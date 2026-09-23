@@ -83,6 +83,6 @@ No function is stubbed with `return 0`-style placeholders.
 1. Run the rebuilt executable; reach `loaderLoop` → KERNEL entry with `module_guard` verification.
 2. Record `checkpoint_boot` (native vs PCSX2 RAM at KERNEL entry via `compare_ram.py`).
 3. Resolve blockers toward MANAGER/GAMECORE entry and the first rendered frame.
-4. Feed exact switch jump tables (from `.rodata` relocations) to the recompiler (710 fallbacks).
+4. Audit the 720 "unresolved JR/JALR" warnings: most are indirect calls through callbacks (handled by resume entries); feed exact switch tables from `.rodata` relocations where they are true switches.
 5. Make `j` tail-jumps dispatch through the function table (upgrade-path completeness).
 6. IOP audio path (SPU2/LIBSD) and DBCMAN pad HLE.

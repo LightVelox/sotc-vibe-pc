@@ -145,6 +145,18 @@ SPU2 / sg2iop_driver ─► audio mixer interface ─► host audio
 Nothing here is enhanced: resolution, frame rate, textures and draw distance stay original until the
 native baseline is proven against PCSX2 checkpoints.
 
+What the game actually requires on the IOP side (from IRX import tables, `Tools/irx_imports.py`):
+
+* **Audio.** The game's own driver `SG2IOPM1.IRX` (`sg2iop_driver`) imports LIBSD functions directly
+  (ordinals 4–26) and is driven from EE-side `Sg2*` code in KERNEL. LIBSD programs SPU2 registers and
+  DMA channels 4/7. The runtime currently offers only a coarse VAG-sample player and an EE-side LIBSD
+  RPC service, so faithful audio needs an SPU2 model behind the IOP (register level, or LIBSD-import
+  HLE) feeding a host mixer. Candidate: an existing GPL-compatible SPU2 implementation behind a
+  small interface, so it can later be swapped for a native mixer.
+* **Pad and memory card.** libpad2/libdbc (EE) talk to `DBCMAN`, which drives `DS1O_D` (DualShock)
+  and `MC2_D` (memory card) over `SIO2MAN`/`SIO2D`. The runtime fakes those module loads; the
+  `VirtualDualShock2` and memory-card backends will be implemented at the DBCMAN service boundary.
+
 ## PCSX2 as the behavioural oracle
 
 `Tools/pcsx2-oracle` is a copy of the supplied PCSX2 with EE/IOP console logging and PINE enabled.

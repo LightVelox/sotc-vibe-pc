@@ -180,10 +180,11 @@ def parse_boot_elf(data):
     return e_entry, secs
 
 
-def discover_boot(elf, secs, kernel):
+def discover_boot(elf, secs, kernel, entry):
     text = next(s for s in secs if s["name"] == ".text")
     region = CodeRegion("BOOT", ".text", text["addr"], elf[text["offset"]:text["offset"] + text["size"]])
     d = Discovery(region)
+    d.add(entry, f"sub_{entry:08X}", "elf-entry", "high")
     for s in kernel.symbols:
         if s.shndx == SHN_ABS and s.name and region.contains(s.value):
             if s.type == STT_FUNC:
@@ -391,6 +392,59 @@ def verify_against_ram(linker, ram_path, report):
     return ok
 
 
+def masked_text(lm, site_set):
+    t = lm.module.section_by_name(".text")
+    base = lm.section_addr[t.index]
+    data = bytearray(lm.image[t.image_addr:t.image_addr + t.size])
+    for a in site_set:
+        if base <= a < base + t.size:
+            data[a - base:a - base + 4] = bytes(4)
+    return base, t.size, sha256(bytes(data))
+
+
+def emit_layout_header(path, profile, linker, sites):
+    site_set = sorted({s[0] for s in sites})
+    lines = [
+        "#pragma once",
+        "#include <cstdint>",
+        "",
+        "namespace sotc::generated",
+        "{",
+        "    struct ModuleLayout",
+        "    {",
+        "        const char *name;",
+        "        uint32_t base;",
+        "        uint32_t bss;",
+        "        uint32_t entry;",
+        "        uint32_t text;",
+        "        uint32_t textSize;",
+        "        const char *maskedTextSha256;",
+        "    };",
+        "",
+        f'    inline constexpr const char *kSerial = "{profile["serial"]}";',
+        f'    inline constexpr const char *kVersion = "{profile["version"]}";',
+        f'    inline constexpr uint64_t kDiscSize = {profile["disc"]["size"]}ull;',
+        f'    inline constexpr const char *kBootElfPath = "{profile["boot_elf"]["path"]}";',
+        f'    inline constexpr const char *kBootElfSha256 = "{profile["boot_elf"]["sha256"]}";',
+        f'    inline constexpr uint32_t kUndefinedImportStub = {hexint(profile["undefined_import_stub"]):#010x}u;',
+        "",
+        "    inline constexpr ModuleLayout kModules[] = {",
+    ]
+    for lm, p in zip(linker.modules, profile["modules"]):
+        base, size, h = masked_text(lm, site_set)
+        lines.append(f'        {{"{lm.module.name}", {lm.base:#010x}u, {lm.bss_addr:#010x}u, {lm.entry:#010x}u, {base:#010x}u, {size:#x}u, "{h}"}},')
+    lines += ["    };", "", "    inline constexpr struct { const char *path; const char *sha256; } kModuleFiles[] = {"]
+    for p in profile["modules"]:
+        lines.append(f'        {{"{p["path"]}", "{p["sha256"]}"}},')
+    lines += ["    };", "", "    inline constexpr uint32_t kRuntimeRelocationSites[] = {"]
+    for i in range(0, len(site_set), 8):
+        lines.append("        " + " ".join(f"{a:#010x}u," for a in site_set[i:i + 8]))
+    lines += ["    };", "}", ""]
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "w", newline="") as f:
+        f.write("\n".join(lines))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Link Shadow of the Colossus boot ELF + XFF modules into a recompilation image")
     ap.add_argument("--profile", required=True)
@@ -399,6 +453,7 @@ def main():
     src.add_argument("--files")
     ap.add_argument("--out", required=True)
     ap.add_argument("--verify-ram")
+    ap.add_argument("--emit-header")
     args = ap.parse_args()
 
     profile = json.load(open(args.profile))
@@ -452,7 +507,7 @@ def main():
                               lm.image[s.image_addr:s.image_addr + s.size],
                               s.name in (".text", ".vutext"), s.name == ".data")
 
-    region, boot_funcs = discover_boot(boot, secs, kernel)
+    region, boot_funcs = discover_boot(boot, secs, kernel, entry)
     all_funcs = [(region, "boot.text", boot_funcs)]
     for lm, (p, m) in zip(linker.modules, modules):
         for r, fl in discover_module(lm, p):
@@ -506,6 +561,8 @@ def main():
         "runtime_reloc_sites": len(sites),
     }
     json.dump(layout, open(os.path.join(args.out, "sotc_layout.json"), "w"), indent=2)
+    if args.emit_header:
+        emit_layout_header(args.emit_header, profile, linker, sites)
 
     by_src = {}
     for f in rows:

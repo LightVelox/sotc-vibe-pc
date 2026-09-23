@@ -1,0 +1,39 @@
+[general]
+input = "../../build/link/sotc_linked.elf"
+ghidra_output = "../../build/link/sotc_functions.csv"
+runtime_relocations = "../../build/link/sotc_runtime_relocs.csv"
+output = "../generated"
+single_file_output = false
+output_worker_threads = 0
+patch_syscalls = false
+patch_cop0 = false
+patch_cache = false
+auto_stub_by_name = false
+skip = []
+stubs = [
+  "sceSifStopDma", "sceSifDmaStat", "sceSifSetDma", "isceSifSetDma", "sceSifSetDChain", "isceSifSetDChain",
+  "sceSifSetReg", "sceSifGetReg", "sceSifGetSreg", "sceSifSetSreg", "sceSifGetDataTable",
+  "sceSifInitCmd", "sceSifExitCmd", "sceSifSetCmdBuffer", "sceSifSetSysCmdBuffer",
+  "sceSifAddCmdHandler", "sceSifRemoveCmdHandler", "sceSifSendCmd", "sceSifWriteBackDCache",
+  "sceSifInitRpc", "sceSifExitRpc", "sceSifGetOtherData", "sceSifBindRpc", "sceSifCallRpc", "sceSifCheckStatRpc",
+  "sceSifSetRpcQueue", "sceSifRegisterRpc", "sceSifRemoveRpc", "sceSifRemoveRpcQueue",
+  "sceSifGetNextRequest", "sceSifExecRequest", "sceSifRpcLoop",
+  "sceSifInitIopHeap", "sceSifAllocIopHeap", "sceSifAllocSysMemory", "sceSifFreeSysMemory", "sceSifFreeIopHeap",
+  "sceSifLoadIopHeap", "sceSifLoadFileReset", "sceSifLoadModuleBuffer", "sceSifLoadModule", "sceSifLoadElfPart",
+  "sceSifLoadElf", "sceSifGetIopAddr", "sceSifSetIopAddr", "sceSifResetIop", "sceSifIsAliveIop", "sceSifSyncIop",
+  "sceSifRebootIop",
+  "sceFsInit", "sceFsReset", "sceOpen", "sceClose", "sceLseek", "sceRead", "sceWrite", "sceIoctl",
+  "open", "close", "read", "write", "lseek", "fstat", "stat", "getpid",
+  "sceDeci2Open", "sceDeci2Close", "sceDeci2ReqSend", "sceDeci2Poll", "sceDeci2ExRecv", "sceDeci2ExSend",
+  "sceDeci2ExReqSend", "sceDeci2ExLock", "sceDeci2ExUnLock",
+  "sceTtyWrite", "sceTtyRead", "sceTtyInit", "sceResetttyinit", "scePrintf",
+  "sceCdCallback", "sceCdInitEeCB", "sceCdSearchFile", "sceCdNcmdDiskReady", "sceCdSync", "sceCdSyncS", "sceCdInit",
+  "sceCdDiskReady", "sceCdMmode", "sceCdRead", "sceCdReadIOPm", "sceCdGetError", "sceCdStatus", "sceCdReadClock",
+  "sceMpegCreate", "sceMpegInit", "sceMpegDelete", "sceMpegAddBs", "sceMpegGetPicture", "sceMpegGetPictureRAW8",
+  "sceMpegReset", "sceMpegIsEnd", "sceMpegIsRefBuffEmpty", "sceMpegSetDecodeMode", "sceMpegGetDecodeMode",
+  "sceMpegAddCallback", "sceMpegClearRefBuff", "sceMpegGetPictureRAW8xy", "sceMpegSetDefaultPtsGap",
+  "sceMpegResetDefaultPtsGap", "sceMpegSetImageBuff", "sceMpegDispWidth", "sceMpegDispHeight",
+  "sceMpegDispCenterOffX", "sceMpegDispCenterOffY", "sceMpegDemuxPssRing", "sceMpegDemuxPss", "sceMpegAddStrCallback",
+  "sceIpuStopDMA", "sceIpuRestartDMA", "sceIpuSync", "sceIpuInit",
+  "_sceSDC", "_sceIDC",
+]

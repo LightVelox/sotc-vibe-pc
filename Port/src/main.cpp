@@ -4,6 +4,7 @@
 #include "sotc/log.h"
 #include "sotc/module_guard.h"
 #include "sotc/watchdog.h"
+#include "sotc/hle/sce_fileio.h"
 #include "sotc_layout_generated.h"
 
 #include <cstdlib>
@@ -124,6 +125,7 @@ int main(int argc, char *argv[])
         sotc::FunctionHooks::instance().attach(runtime);
         sotc::installEeFloatingPointMode(runtime, runtime.cpu().pc);
         sotc::installModuleGuards(runtime);
+        sotc::hle::installSceFileIo(runtime);
         sotc::installCallTracesFromEnvironment(runtime);
         sotc::FunctionHooks::instance().logBindings();
 

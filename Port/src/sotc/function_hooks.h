@@ -16,6 +16,7 @@ namespace sotc
         Recompiled,
         Observed,
         Native,
+        Hle,
         TemporaryStub,
     };
 

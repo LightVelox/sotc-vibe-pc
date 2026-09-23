@@ -30,6 +30,8 @@ namespace sotc
                 return "recomp+observed";
             case ReplacementStatus::Native:
                 return "native";
+            case ReplacementStatus::Hle:
+                return "hle";
             case ReplacementStatus::TemporaryStub:
                 return "TEMPORARY-STUB";
             }

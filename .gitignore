@@ -1,0 +1,14 @@
+/Game/
+/Emulator/
+/build/
+/out/
+/Tools/pcsx2-oracle/
+/Analysis/extracted/
+/Analysis/oracle/
+/Analysis/iso_hashes.txt
+/Port/generated/
+/Port/game_data/
+*.log
+__pycache__/
+*.pyc
+.vs/

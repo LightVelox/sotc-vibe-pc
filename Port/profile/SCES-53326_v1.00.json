@@ -1,0 +1,40 @@
+{
+  "serial": "SCES-53326",
+  "title": "Shadow of the Colossus",
+  "region": "PAL (Europe, Australia)",
+  "version": "1.00",
+  "disc": {
+    "md5": "13871262c004856b175c0ea3ac65a430",
+    "sha256": "068925770645266189005f09c9a9a1fee25726bfc93c89b12f832f3673664ac4",
+    "size": 4635918336
+  },
+  "boot_elf": {
+    "path": "SCES_533.26",
+    "sha256": "851f0c4f48b0b4bb61e89fb7e97d4e9b4ac4c2ea0ff143d1d95e18337ea8b57c"
+  },
+  "modules": [
+    {
+      "name": "KERNEL",
+      "path": "KERNEL.XFF",
+      "sha256": "d83a2d4d7631ed740946849b1b4ba32620891fc41817bb16175fedb9f9cd6463",
+      "base": "0x001A5400",
+      "bss": "0x001EFA00"
+    },
+    {
+      "name": "MANAGER",
+      "path": "MANAGER.XFF",
+      "sha256": "2de4d80eed7ff6c89b34b587ee1ced8792921e2a7c80d7e92a4fbb1481f1461a",
+      "base": "0x0116BC40",
+      "bss": "0x0131E040"
+    },
+    {
+      "name": "GAMECORE",
+      "path": "GAMECORE.XFF",
+      "sha256": "aa5a72b239b36da0bfc9f435bf31441057b4f4b8a01405b94b0e3b212fd242e0",
+      "base": "0x013442C0",
+      "bss": "0x012E5540"
+    }
+  ],
+  "undefined_import_stub": "0x001B28F8",
+  "provenance": "module bases/bss and undefined-import stub observed in PCSX2 2.8.2 RAM at title screen (cold boot, fast boot); see Docs/XFF_FORMAT.md"
+}

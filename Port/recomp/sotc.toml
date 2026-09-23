@@ -9,6 +9,7 @@ patch_syscalls = false
 patch_cop0 = false
 patch_cache = false
 auto_stub_by_name = false
+direct_tail_calls = true
 skip = []
 stubs = [
   "sceSifStopDma", "sceSifDmaStat", "sceSifSetDma", "isceSifSetDma", "sceSifSetDChain", "isceSifSetDChain",

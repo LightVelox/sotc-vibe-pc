@@ -69,6 +69,12 @@ class Pine:
     def read32(self, addr):
         return struct.unpack("<I", self._transact(struct.pack("<BI", MSG_READ32, addr)))[0]
 
+    def try_read32(self, addr):
+        try:
+            return self.read32(addr)
+        except RuntimeError:
+            return None
+
     def write32(self, addr, value):
         self._transact(struct.pack("<BII", MSG_WRITE32, addr, value))
 
@@ -103,6 +109,14 @@ def main():
     d.add_argument("addr", type=lambda x: int(x, 0))
     d.add_argument("size", type=lambda x: int(x, 0))
     d.add_argument("out")
+    t = sub.add_parser("trap", help="park the EE at an address by writing 'b .' there, dump RAM, restore")
+    t.add_argument("addr", type=lambda x: int(x, 0))
+    t.add_argument("out")
+    t.add_argument("--settle", type=float, default=2.0)
+    t.add_argument("--keep", action="store_true", help="leave the trap in place")
+    t.add_argument("--wait-for", type=lambda x: int(x, 0), help="poll until this word is at addr before trapping")
+    t.add_argument("--timeout", type=float, default=60.0)
+    t.add_argument("--wait-nonzero", type=lambda x: int(x, 0), help="poll until this address holds a non-zero word")
     w = sub.add_parser("wait")
     w.add_argument("seconds", type=float, nargs="?", default=60)
     args = ap.parse_args()
@@ -131,6 +145,28 @@ def main():
         for i in range(args.count):
             a = args.addr + 4 * i
             print(f"{a:08x}: {p.read32(a):08x}")
+    elif args.cmd == "trap":
+        deadline = time.time() + args.timeout
+        if args.wait_nonzero is not None:
+            while not p.try_read32(args.wait_nonzero):
+                if time.time() > deadline:
+                    sys.exit(f"timed out waiting for a non-zero word at {args.wait_nonzero:08x}")
+                time.sleep(0.002)
+        if args.wait_for is not None:
+            while p.try_read32(args.addr) != args.wait_for:
+                if time.time() > deadline:
+                    sys.exit(f"timed out waiting for {args.wait_for:08x} at {args.addr:08x}")
+                time.sleep(0.001)
+        original = p.read32(args.addr)
+        p.write32(args.addr, 0x1000FFFF)
+        print(f"trap set at {args.addr:08x} (original {original:08x}); waiting {args.settle}s")
+        time.sleep(args.settle)
+        still = p.read32(args.addr)
+        data = p.read_block(0, 0x2000000)
+        open(args.out, "wb").write(data)
+        if not args.keep:
+            p.write32(args.addr, original)
+        print(f"dumped RAM to {args.out}; trap word now {still:08x}; {'kept' if args.keep else 'restored'}")
     elif args.cmd == "dump":
         t = time.time()
         data = p.read_block(args.addr, args.size)

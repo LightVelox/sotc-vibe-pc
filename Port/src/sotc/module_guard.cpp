@@ -12,6 +12,7 @@
 #include <memory>
 #include <sstream>
 #include <cstring>
+#include <fstream>
 #include <vector>
 #include <xmmintrin.h>
 #include <pmmintrin.h>
@@ -76,9 +77,38 @@ namespace sotc
 
 namespace sotc
 {
+    void installRamDumpFromEnvironment()
+    {
+        const char *value = std::getenv("SOTC_DUMP_RAM_AT");
+        if (!value)
+        {
+            return;
+        }
+        const std::string spec(value);
+        const size_t colon = spec.find(':');
+        if (colon == std::string::npos)
+        {
+            SOTC_ERROR(Boot, "SOTC_DUMP_RAM_AT must be <hex address>:<file>");
+            return;
+        }
+        const uint32_t address = static_cast<uint32_t>(std::stoul(spec.substr(0, colon), nullptr, 16));
+        const std::string path = spec.substr(colon + 1);
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        FunctionHooks::instance().observeEntry(address, "ramdump", [address, path, done](uint8_t *rdram, R5900Context *, PS2Runtime *) {
+            if (done->exchange(true))
+            {
+                return;
+            }
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out.write(reinterpret_cast<const char *>(rdram), PS2_RAM_SIZE);
+            SOTC_INFO(Boot, "guest RAM dumped at entry of 0x" << std::hex << address << " to " << path);
+        });
+    }
+
     void installCallTracesFromEnvironment(PS2Runtime &runtime)
     {
         (void)runtime;
+        installRamDumpFromEnvironment();
         const char *value = std::getenv("SOTC_TRACE_CALLS");
         if (!value)
         {

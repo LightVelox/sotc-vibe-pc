@@ -2,8 +2,12 @@
 #include "sotc/function_hooks.h"
 #include "sotc/log.h"
 #include "ps2_syscalls.h"
+#include "ps2_stubs.h"
 #include "runtime/ps2_cd_image.h"
 #include "runtime/ps2_memory.h"
+#include "runtime/ee_scheduler.h"
+
+#include <cstdlib>
 
 #include <cstring>
 #include <string>
@@ -50,12 +54,97 @@ namespace sotc::hle
             setReturnS32(ctx, result);
         }
 
+        uint64_t dvdBytesPerSecond()
+        {
+            static const uint64_t rate = []
+            {
+                const char *value = std::getenv("SOTC_DVD_RATE");
+                return value ? std::strtoull(value, nullptr, 10) : 3500000ull;
+            }();
+            return rate;
+        }
+
+        void sceReadTimed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t resumePc = getRegU32(ctx, 31);
+            returnTo(ctx);
+            const int32_t fd = static_cast<int32_t>(getRegU32(ctx, 4));
+            ps2_syscalls::fioRead(rdram, ctx, runtime);
+            const int32_t result = static_cast<int32_t>(getRegU32(ctx, 2));
+            const uint64_t rate = dvdBytesPerSecond();
+            if (result <= 0 || rate == 0)
+            {
+                return;
+            }
+            constexpr uint64_t kFieldsPerSecond = 50;
+            const uint64_t ticks = 1 + (static_cast<uint64_t>(result) * kFieldsPerSecond + rate - 1) / rate;
+            SOTC_TRACE(File, "sceRead(fd=" << fd << ") -> " << result << " bytes, blocking " << ticks << " vsync(s)");
+            EeScheduler &scheduler = runtime->eeScheduler();
+            scheduler.waitVSync(scheduler.currentVSyncTick() + ticks - 1, result, [resumePc](R5900Context &context)
+                                { context.pc = resumePc; });
+        }
+
+        uint64_t envFields(const char *name, uint64_t fallback)
+        {
+            const char *value = std::getenv(name);
+            return value ? std::strtoull(value, nullptr, 10) : fallback;
+        }
+
+        void blockCallerFields(R5900Context *ctx, PS2Runtime *runtime, uint32_t resumePc, uint64_t fields)
+        {
+            const int32_t result = static_cast<int32_t>(getRegU32(ctx, 2));
+            if (result < 0 || fields == 0)
+            {
+                return;
+            }
+            EeScheduler &scheduler = runtime->eeScheduler();
+            scheduler.waitVSync(scheduler.currentVSyncTick() + fields - 1, result, [resumePc](R5900Context &context)
+                                { context.pc = resumePc; });
+        }
+
+        void blockCallerOneField(R5900Context *ctx, PS2Runtime *runtime, uint32_t resumePc)
+        {
+            blockCallerFields(ctx, runtime, resumePc, 1);
+        }
+
+        bool isDiscPath(const std::string &path)
+        {
+            return path.rfind("cdrom", 0) == 0;
+        }
+
         void sceGetstatHle(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
+            const uint32_t resumePc = getRegU32(ctx, 31);
             returnTo(ctx);
             const std::string path = guestString(rdram, getRegU32(ctx, 4));
             ps2_syscalls::fioGetstat(rdram, ctx, runtime);
             SOTC_TRACE(File, "sceGetstat(\"" << path << "\") -> " << static_cast<int32_t>(getRegU32(ctx, 2)));
+            if (isDiscPath(path))
+            {
+                blockCallerOneField(ctx, runtime, resumePc);
+            }
+        }
+
+        void sceOpenTimed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t resumePc = getRegU32(ctx, 31);
+            returnTo(ctx);
+            const std::string path = guestString(rdram, getRegU32(ctx, 4));
+            ps2_stubs::sceOpen(rdram, ctx, runtime);
+            SOTC_TRACE(File, "sceOpen(\"" << path << "\") -> " << static_cast<int32_t>(getRegU32(ctx, 2)));
+            if (isDiscPath(path))
+            {
+                blockCallerOneField(ctx, runtime, resumePc);
+            }
+        }
+
+        void sceCdSearchFileTimed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            const uint32_t resumePc = getRegU32(ctx, 31);
+            returnTo(ctx);
+            ps2_stubs::sceCdSearchFile(rdram, ctx, runtime);
+            static const uint64_t searchFields = envFields("SOTC_CD_SEARCH_FIELDS", 3);
+            blockCallerFields(ctx, runtime, resumePc, searchFields);
         }
 
         void sceChstatHle(uint8_t *rdram, R5900Context *ctx, PS2Runtime *)
@@ -158,7 +247,10 @@ namespace sotc::hle
         };
 
         const Binding kBindings[] = {
-            {0x0010C2A8, "sceGetstat", &sceGetstatHle, "fio RPC 12 served from the runtime VFS (ISO/host)"},
+            {0x0010A6C0, "sceOpen", &sceOpenTimed, "fio open via runtime VFS; disc opens block the caller for one field (IOP RPC + seek latency)"},
+            {0x00116E88, "sceCdSearchFile", &sceCdSearchFileTimed, "runtime ISO lookup; caller blocks for a modelled seek + directory read (SOTC_CD_SEARCH_FIELDS, default 3)"},
+            {0x0010AD08, "sceRead", &sceReadTimed, "fio read via runtime VFS; caller blocks for modelled DVD transfer time (SOTC_DVD_RATE)"},
+            {0x0010C2A8, "sceGetstat", &sceGetstatHle, "fio RPC 12 served from the runtime VFS (ISO/host); disc paths block one field"},
             {0x0010B978, "sceMkdir", &forward<ps2_syscalls::fioMkdir>, "fio via runtime VFS"},
             {0x0010BB30, "sceRmdir", &forward<ps2_syscalls::fioRmdir>, "fio via runtime VFS"},
             {0x0010B958, "sceRemove", &forward<ps2_syscalls::fioRemove>, "fio via runtime VFS"},

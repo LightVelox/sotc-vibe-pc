@@ -105,10 +105,35 @@ namespace sotc
         });
     }
 
+    void installThreadTraceFromEnvironment()
+    {
+        if (!std::getenv("SOTC_TRACE_THREADS"))
+        {
+            return;
+        }
+        FunctionHooks::instance().observeEntry(0x001066E0, "trace_CreateThread", [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *) {
+            const uint32_t param = getRegU32(ctx, 4) & PS2_RAM_MASK;
+            uint32_t words[7];
+            std::memcpy(words, rdram + param, sizeof(words));
+            SOTC_INFO(Ee, "CreateThread(entry=0x" << std::hex << words[1] << " stack=0x" << words[2] << " size=0x" << words[3]
+                                                  << " gp=0x" << words[4] << " prio=" << std::dec << words[5] << ") from ra=0x" << std::hex
+                                                  << getRegU32(ctx, 31));
+        });
+        FunctionHooks::instance().observeEntry(0x001073D0, "trace_StartThread", [](uint8_t *, R5900Context *ctx, PS2Runtime *) {
+            SOTC_INFO(Ee, "StartThread(id=" << getRegU32(ctx, 4) << ", arg=0x" << std::hex << getRegU32(ctx, 5) << ") from ra=0x"
+                                            << getRegU32(ctx, 31) << " sp=0x" << getRegU32(ctx, 29));
+        });
+        FunctionHooks::instance().observeEntry(0x00106770, "trace_ChangeThreadPriority", [](uint8_t *, R5900Context *ctx, PS2Runtime *) {
+            SOTC_INFO(Ee, "ChangeThreadPriority(id=" << static_cast<int32_t>(getRegU32(ctx, 4)) << ", prio=" << getRegU32(ctx, 5)
+                                                     << ") from ra=0x" << std::hex << getRegU32(ctx, 31));
+        });
+    }
+
     void installCallTracesFromEnvironment(PS2Runtime &runtime)
     {
         (void)runtime;
         installRamDumpFromEnvironment();
+        installThreadTraceFromEnvironment();
         const char *value = std::getenv("SOTC_TRACE_CALLS");
         if (!value)
         {

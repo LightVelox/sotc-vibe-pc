@@ -3,6 +3,7 @@
 #include "sotc/game_disc.h"
 #include "sotc/log.h"
 #include "sotc/module_guard.h"
+#include "sotc/watchdog.h"
 #include "sotc_layout_generated.h"
 
 #include <cstdlib>
@@ -116,11 +117,17 @@ int main(int argc, char *argv[])
         }
         PS2Runtime::setIoPaths(paths);
 
+        const char *missingPolicy = std::getenv("SOTC_MISSING_FUNCTION");
+        runtime.setMissingFunctionPolicy(missingPolicy && std::string(missingPolicy) == "continue"
+                                             ? PS2Runtime::MissingFunctionPolicy::ContinueToTarget
+                                             : PS2Runtime::MissingFunctionPolicy::Stop);
         sotc::FunctionHooks::instance().attach(runtime);
         sotc::installEeFloatingPointMode(runtime, runtime.cpu().pc);
         sotc::installModuleGuards(runtime);
+        sotc::installCallTracesFromEnvironment(runtime);
         sotc::FunctionHooks::instance().logBindings();
 
+        sotc::watchdog::startFromEnvironment();
         SOTC_INFO(Boot, "starting guest at 0x" << std::hex << runtime.cpu().pc);
         runtime.run();
         SOTC_INFO(Boot, "runtime exited");

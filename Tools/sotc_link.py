@@ -61,6 +61,21 @@ class FunctionInfo:
         self.callees = set()
 
 
+def is_function_boundary(region, t):
+    if not region.contains(t) or t == region.addr:
+        return t == region.addr
+    q = t
+    while q - 4 >= region.addr and region.word(q - 4) == NOP:
+        q -= 4
+    for back in (8, 4):
+        if q - back < region.addr:
+            continue
+        w = region.word(q - back)
+        if (w & 0xFC1FFFFF) == 0x00000008 or (w >> 26) == 2:
+            return True
+    return False
+
+
 class Discovery:
     def __init__(self, region):
         self.region = region
@@ -112,6 +127,12 @@ class Discovery:
             for t in targets:
                 if not self.inside_named(t):
                     self.add(t, f"sub_{t:08X}", "ptr-table", "medium")
+
+    def add_boundary_pointers(self):
+        for table in self.data_pointer_tables:
+            for t in table:
+                if self.region.contains(t) and t not in self.funcs and not self.inside_named(t) and is_function_boundary(self.region, t):
+                    self.add(t, f"sub_{t:08X}", "ptr-boundary", "medium")
 
     def finalize(self):
         r = self.region
@@ -231,6 +252,7 @@ def discover_boot(elf, secs, kernel, entry):
                     break
     d.data_pointer_tables = group_tables(ptrs)
     d.resolve_pointer_tables()
+    d.add_boundary_pointers()
     d.add_gap_starts()
     return region, d.finalize()
 

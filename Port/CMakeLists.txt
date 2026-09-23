@@ -15,12 +15,13 @@ set(SOTC_HOST_SOURCES
     src/sotc/log.cpp
     src/sotc/module_guard.cpp
     src/sotc/sha256.cpp
+    src/sotc/watchdog.cpp
 )
 
 add_library(sotc_game_code STATIC ${SOTC_GENERATED_SOURCES})
 target_include_directories(sotc_game_code PUBLIC "${SOTC_GENERATED_DIR}")
 target_link_libraries(sotc_game_code PUBLIC ps2_runtime)
-set_target_properties(sotc_game_code PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 48)
+set_target_properties(sotc_game_code PROPERTIES UNITY_BUILD OFF)
 target_precompile_headers(sotc_game_code PRIVATE
     "${CMAKE_SOURCE_DIR}/External/PS2Recomp/ps2xRuntime/include/ps2_runtime_macros.h"
     "${CMAKE_SOURCE_DIR}/External/PS2Recomp/ps2xRuntime/include/ps2_runtime.h"
@@ -37,6 +38,7 @@ target_link_libraries(sotc PRIVATE sotc_game_code ps2_runtime)
 if(MSVC)
     target_compile_options(sotc_game_code PRIVATE /bigobj /fp:precise /W0 /MP)
     target_compile_options(sotc PRIVATE /fp:precise /W3 /utf-8)
+    target_compile_definitions(sotc PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_link_options(sotc PRIVATE /FORCE:MULTIPLE /STACK:16777216)
 endif()
 

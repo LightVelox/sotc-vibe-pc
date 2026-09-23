@@ -6,6 +6,11 @@
 #include "runtime/ps2_memory.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <iomanip>
+#include <memory>
+#include <sstream>
 #include <cstring>
 #include <vector>
 #include <xmmintrin.h>
@@ -65,6 +70,42 @@ namespace sotc
                                                    [layout](uint8_t *rdram, R5900Context *, PS2Runtime *rt) {
                                                        verifyModule(*layout, rdram, rt);
                                                    });
+        }
+    }
+}
+
+namespace sotc
+{
+    void installCallTracesFromEnvironment(PS2Runtime &runtime)
+    {
+        (void)runtime;
+        const char *value = std::getenv("SOTC_TRACE_CALLS");
+        if (!value)
+        {
+            return;
+        }
+        std::string list(value);
+        size_t start = 0;
+        while (start < list.size())
+        {
+            const size_t comma = list.find(',', start);
+            const std::string token = list.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            start = comma == std::string::npos ? list.size() : comma + 1;
+            if (token.empty())
+            {
+                continue;
+            }
+            const uint32_t address = static_cast<uint32_t>(std::stoul(token, nullptr, 16));
+            auto counter = std::make_shared<std::atomic<uint32_t>>(0u);
+            FunctionHooks::instance().observeEntry(address, "trace_" + token, [address, counter](uint8_t *, R5900Context *ctx, PS2Runtime *) {
+                const uint32_t n = counter->fetch_add(1);
+                if (n < 64u || (n & (n - 1u)) == 0u)
+                {
+                    SOTC_INFO(Ee, "call #" << n << " 0x" << std::hex << address << " a0=" << getRegU32(ctx, 4) << " a1=" << getRegU32(ctx, 5)
+                                          << " a2=" << getRegU32(ctx, 6) << " a3=" << getRegU32(ctx, 7) << " ra=" << getRegU32(ctx, 31)
+                                          << " sp=" << getRegU32(ctx, 29));
+                }
+            });
         }
     }
 }

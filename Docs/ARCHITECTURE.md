@@ -133,12 +133,13 @@ Clamping of overflowed results to ±FLT_MAX is not yet implemented (tracked).
 
 ### Rendering, audio, input
 
-Currently provided by the PS2Recomp runtime (GS emulation to a raylib window; audio backend; pad via
-raylib). The planned structure, not yet implemented:
+Currently provided by the PS2Recomp runtime (GS emulation to a raylib window; audio backend). Input is
+implemented as below; rendering and audio follow the planned structure, not yet implemented:
 
 ```
 Game logic (recompiled) ─► GIF/VIF/VU packets ─► GS command stream ─► Renderer interface ─► backend
-Input backend (SDL/XInput) ─► PCInputBackend ─► VirtualDualShock2 ─► pad driver replies (IOP)
+raylib keyboard/gamepad ─► ps2_host_input snapshot ─► IopHost::readPad ─► SIO2 port 0: VirtualDualShock2
+                                                          (SIO2MAN ◄─ DS1O_D ◄─ DBCMAN ─► SIF DMA ─► libpad2)
 SPU2 / sg2iop_driver ─► audio mixer interface ─► host audio
 ```
 
@@ -154,8 +155,11 @@ What the game actually requires on the IOP side (from IRX import tables, `Tools/
   HLE) feeding a host mixer. Candidate: an existing GPL-compatible SPU2 implementation behind a
   small interface, so it can later be swapped for a native mixer.
 * **Pad and memory card.** libpad2/libdbc (EE) talk to `DBCMAN`, which drives `DS1O_D` (DualShock)
-  and `MC2_D` (memory card) over `SIO2MAN`/`SIO2D`. The runtime fakes those module loads; the
-  `VirtualDualShock2` and memory-card backends will be implemented at the DBCMAN service boundary.
+  and `MC2_D` (memory card) over `SIO2MAN`/`SIO2D`. All of these IRX modules run unmodified on the IOP
+  emulator; the boundary is the SIO2 hardware (`ps2xIOP/src/emulator/devices/iop_sio2.cpp`). Its pad
+  ports hold `VirtualDualShock2` devices that speak the DualShock 2 protocol and read the host state
+  through `IopHost::readPad`; the runtime samples raylib input on the render thread once per frame
+  (`ps2xRuntime/src/lib/ps2_host_input.cpp`). Memory-card ports 2/3 currently report no device.
 
 ## PCSX2 as the behavioural oracle
 

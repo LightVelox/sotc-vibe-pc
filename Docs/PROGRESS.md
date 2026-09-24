@@ -57,12 +57,23 @@ Last updated: 2026-09-24. Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
   * **`sceCdReadIOPm`** was an alias of `sceCdRead` and wrote sound data (PS-ADPCM) meant for IOP address
     0x100000 over the EE boot image at 0x00100000 (code and `.rodata`), which later crashed `vfprintf`
     through its corrupted jump table. It now reads into IOP RAM and uses the same drive timing model.
+* **Opening cutscene and 3D cameras**: after the SCEE logo the real-time cloud/hawk cutscene renders
+  (letterboxed, as in PCSX2) instead of a flat slate-grey screen. Root cause: every `R5900Context` except
+  the boot thread's started with VU0 `VF00 = (0,0,0,0)` (`EeScheduler::startThread` and interrupt/alarm/
+  callback invocations default-construct their contexts). `iosGetSinCosf` computes cos as
+  `sqrt(VF00.w - sin^2)`, so on game threads cos = |sin|, `iosGetTanf` returned 1.0 for every angle, the
+  eye-to-screen distance was 208 instead of 502.2 and the camera matrices degenerated (the `FLT_MAX` view
+  matrix on the menu). `VF00` is now part of the `R5900Context` reset state. Side effects: the menu no
+  longer draws the solar-flare pass (the frustum test fails, as in PCSX2) and runs at ~7.4 fields/s
+  instead of 4.5 (1.7 on the 50/60 Hz menu); boot reaches the SCEE logo at ~112 s instead of ~165 s.
 * **EE FPU / VU0 macro semantics**: saturation instead of Inf/NaN, EE divide by zero, `sqrt(|x|)`,
   `VRSQRT = fs/sqrt(|ft|)`, `CVT.W.S` saturation; MXCSR round-toward-zero + FTZ/DAZ on the game thread.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
   with VSync rate and EE thread/semaphore snapshot (`SOTC_WATCHDOG`, `SOTC_WATCHDOG_THREADS`),
   sampling profiler (`SOTC_PROFILE=delay:seconds`), guest call tracer (`SOTC_TRACE_CALLS`), thread
-  tracer (`SOTC_TRACE_THREADS`), scripted pad input (`PS2X_PAD_SCRIPT=seconds:button[+button][:hold],...`),
+  tracer (`SOTC_TRACE_THREADS`), scripted pad input (`PS2X_PAD_SCRIPT=start:button[+button][:hold],...`; `start` in seconds, or in
+  VSync fields with a `v` suffix, e.g. `290v:cross,375v:cross,770v:down,800v:cross` reaches the SCEE logo
+  without a memory card; field-timed steps hold 10 fields by default),
   RAM dumps at a function entry with an optional memory condition
   (`SOTC_DUMP_RAM_AT=addr:file[:when=addr=value]`), missing guest functions stop the run.
 * **GS diagnostics**: `PS2X_GS_TRACE=firstVsync:count:file` writes every draw (`D`, full context
@@ -84,10 +95,11 @@ Last updated: 2026-09-24. Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 ## Partially working
 
 * Rendering: the software GS rasterizer draws the menu correctly but slowly. Measured 2026-09-24:
-  ~18 fields/s while loading, ~4.5 fields/s on the menu. Menu profile (`SOTC_PROFILE`): 80% of game-thread
+  ~18 fields/s while loading, ~4.5 fields/s on the menu (before the VF00 fix; ~7.4 after it), ~4.6 on the
+  SCEE logo scene and ~0.9 on the cloud cutscene. Menu profile (`SOTC_PROFILE`): 80% of game-thread
   time under `GS::processGIFPacket` -> `GSCpuBackend` (sprites 47% incl., triangles 32% incl., texture
   sampling 32%, `WritePixel` 22%); `advanceEeTimers` ~6%, `iosRecvMsg` ~7%. A native menu frame is ~10.5 M
-  pixel operations, most of them from the solar-flare pass that PCSX2 does not draw (see blockers).
+  pixel operations, most of them from the solar-flare pass that the VF00 fix removed.
   Boot is ~2× faster than before (MANAGER at 3.5–4 s, GAMECORE at 6–7 s) after batching IOP execution
   and making scheduler snapshots lazy.
 * Loading spinner blinking: at the end of the loading screen the game's frame loop drifts against VSync
@@ -103,8 +115,6 @@ Last updated: 2026-09-24. Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 | Area | Blocker | Plan |
 |---|---|---|
 | Rendering speed | Per-pixel scalar software GS (`GSCpuBackend`) is 80% of game-thread time on the menu and runs synchronously on the game thread | recommended: GS on its own thread, then a rewritten software rasterizer (per-draw setup, edge-function/span triangles, sprite fast paths, direct swizzle tables), then band-parallel rasterization; GPU backend later behind `GSRasterBackend` |
-| Opening cutscene | After the SCEE logo scene the screen turns flat slate grey (30,40,45) for ~100 s, then black; PCSX2 shows the cloud/hawk cutscene there | GS-trace that phase and diff with a PCSX2 GS dump (cloud rendering, fades, or a missing event) |
-| Camera math | On the menu the camera context (index 1, `0x01301760`) differs from PCSX2: the view matrix (+0x150..+0x1C0) holds `FLT_MAX` where PCSX2 has 1.0, and the screen distance (+0x0C, +0xC0) is 208 instead of 502.2 (= 208 / tan 22.5). The saturated view x projection (+0x5A0) makes `solarFlare` (`0x01196EA0`, mode 2 -> `sub_011952E0`) pass its frustum test, so the game draws 160 full-screen light-ray fans plus a bloom chain (FBP 0x150/0x1B8/0x1D8/0x1E0/0x1FE) that PCSX2 skips; this also causes the faint stripes on the menu. The generated `iosGetTanf`/`iosGetSinCosf` code and the VU0 sin/cos coefficients look correct | find the writers of the 208 and of the view matrix (`update_camera_context` `0x01257CA8`, `get_view_matrix`) and diff their inputs against PCSX2 with `SOTC_DUMP_RAM_AT=...:after=N` + `pine.py trap`; affects every 3D camera |
 | Audio | `sg2iop_driver` drives SPU2 through LIBSD imports; runtime has no IOP-side SPU2 | SPU2 register model on the IOP side feeding a host mixer |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
@@ -175,12 +185,14 @@ No game function is stubbed with placeholder return values.
 
 ## Next priorities
 
-1. Opening cutscene after the SCEE logo shows a flat grey screen (see blockers).
-2. Camera math divergence (view matrix `FLT_MAX`, screen distance 208 vs 502.2): wrong for every 3D
-   camera and the reason the menu draws the solar flare.
-3. Rendering performance (~4.5 fields/s on the menu; disc throughput is capped by the field rate because
-   the drive model completes reads on field boundaries): GS on its own thread, rewritten software
-   rasterizer, then band-parallel rasterization (see blockers).
+1. Rendering performance (~7.4 fields/s on the menu, ~0.9 on the cloud cutscene; disc throughput is capped
+   by the field rate because the drive model completes reads on field boundaries): GS on its own thread,
+   rewritten software rasterizer, then band-parallel rasterization (see blockers).
+2. Compare the opening cutscene with a PCSX2 GS dump draw for draw (clouds, hawk, cliffs); re-check the
+   menu against PCSX2 now that the solar flare is gone (the faint stripes and the TEX1.K difference may
+   have had the same cause).
+3. VU0 register file is per context (each thread/handler has its own copy); on the PS2 it is shared.
+   Harmless so far, revisit if a game thread relies on another thread's VU0 state.
 4. Memory card on SIO2 ports 2/3.
 5. Audio: SPU2 on the IOP side.
 6. Sub-field timed waits in the scheduler; calibrate disc timing against PCSX2; IOP VBlank at the PAL rate.

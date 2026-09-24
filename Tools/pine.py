@@ -117,6 +117,7 @@ def main():
     t.add_argument("--wait-for", type=lambda x: int(x, 0), help="poll until this word is at addr before trapping")
     t.add_argument("--timeout", type=float, default=60.0)
     t.add_argument("--wait-nonzero", type=lambda x: int(x, 0), help="poll until this address holds a non-zero word")
+    t.add_argument("--wait-at", type=lambda x: int(x, 0), help="address checked by --wait-for (default: the trap address)")
     w = sub.add_parser("wait")
     w.add_argument("seconds", type=float, nargs="?", default=60)
     args = ap.parse_args()
@@ -153,7 +154,8 @@ def main():
                     sys.exit(f"timed out waiting for a non-zero word at {args.wait_nonzero:08x}")
                 time.sleep(0.002)
         if args.wait_for is not None:
-            while p.try_read32(args.addr) != args.wait_for:
+            probe = args.wait_at if args.wait_at is not None else args.addr
+            while p.try_read32(probe) != args.wait_for:
                 if time.time() > deadline:
                     sys.exit(f"timed out waiting for {args.wait_for:08x} at {args.addr:08x}")
                 time.sleep(0.001)

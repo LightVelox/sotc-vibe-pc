@@ -12,6 +12,7 @@ set(SOTC_HOST_SOURCES
     src/main.cpp
     src/sotc/function_hooks.cpp
     src/sotc/game_disc.cpp
+    src/sotc/hle/sce_cdvd.cpp
     src/sotc/hle/sce_fileio.cpp
     src/sotc/log.cpp
     src/sotc/module_guard.cpp

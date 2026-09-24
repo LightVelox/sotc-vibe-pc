@@ -1,10 +1,15 @@
 #include "sotc/watchdog.h"
 #include "sotc/log.h"
+#include "ps2_runtime.h"
+#include "runtime/ee_scheduler.h"
 
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <map>
 #include <mutex>
+#include <vector>
+#include <algorithm>
 #include <sstream>
 #include <thread>
 
@@ -101,8 +106,12 @@ namespace sotc::watchdog
         }
 #endif
 
+        PS2Runtime *g_runtime = nullptr;
+
         void loop(int intervalSeconds)
         {
+            uint64_t lastTick = g_runtime ? g_runtime->memory().gs().vsyncTick.load() : 0;
+            auto lastTime = std::chrono::steady_clock::now();
             while (g_running.load())
             {
                 for (int i = 0; i < intervalSeconds * 10 && g_running.load(); ++i)
@@ -115,6 +124,33 @@ namespace sotc::watchdog
                 }
                 const auto frames = captureThreadStack(L"GameThread", 28);
                 std::ostringstream message;
+                if (g_runtime)
+                {
+                    const uint64_t tick = g_runtime->memory().gs().vsyncTick.load();
+                    const auto now = std::chrono::steady_clock::now();
+                    const double seconds = std::chrono::duration<double>(now - lastTime).count();
+                    message << "vsync " << tick << " (" << (tick - lastTick) / seconds << "/s); ";
+                    lastTick = tick;
+                    lastTime = now;
+                }
+                if (g_runtime && std::getenv("SOTC_WATCHDOG_THREADS"))
+                {
+                    const EeKernelSnapshot kernel = g_runtime->eeScheduler().snapshot();
+                    message << "running=" << kernel.runningThreadId << '\n';
+                    for (const auto &t : kernel.threads)
+                    {
+                        message << "    thread " << t.id << " entry=0x" << std::hex << t.entry << " pc=0x" << t.pc << " ra=0x" << t.ra
+                                << " sp=0x" << t.sp << std::dec << " prio=" << t.currentPriority << " status=" << static_cast<int>(t.status)
+                                << " wait=" << static_cast<int>(t.waitReason) << ":" << t.waitId << " wakeups=" << t.wakeupCount << '\n';
+                    }
+                    for (const auto &sema : kernel.semaphores)
+                    {
+                        if (sema.waiters)
+                        {
+                            message << "    sema " << sema.id << " count=" << sema.count << "/" << sema.maxCount << " waiters=" << sema.waiters << '\n';
+                        }
+                    }
+                }
                 message << "GameThread native stack:";
                 for (const auto &frame : frames)
                 {
@@ -189,8 +225,67 @@ namespace sotc::watchdog
         return frames;
     }
 
-    void startFromEnvironment()
+    void profileLoop(int delaySeconds, int durationSeconds)
     {
+        std::this_thread::sleep_for(std::chrono::seconds(delaySeconds));
+        std::map<std::string, int> self;
+        std::map<std::string, int> inclusive;
+        int samples = 0;
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(durationSeconds);
+        while (std::chrono::steady_clock::now() < end && g_running.load())
+        {
+            const auto frames = captureThreadStack(L"GameThread", 40);
+            if (!frames.empty())
+            {
+                ++samples;
+                auto strip = [](const std::string &f) { return f.substr(0, f.find('+')); };
+                ++self[strip(frames.front())];
+                std::vector<std::string> seen;
+                for (const auto &f : frames)
+                {
+                    const std::string name = strip(f);
+                    if (std::find(seen.begin(), seen.end(), name) == seen.end())
+                    {
+                        seen.push_back(name);
+                        ++inclusive[name];
+                    }
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        auto report = [&](const char *title, const std::map<std::string, int> &table)
+        {
+            std::vector<std::pair<int, std::string>> sorted;
+            for (const auto &[name, count] : table)
+            {
+                sorted.emplace_back(count, name);
+            }
+            std::sort(sorted.rbegin(), sorted.rend());
+            std::ostringstream out;
+            out << title << " (" << samples << " samples):";
+            for (size_t i = 0; i < sorted.size() && i < 25; ++i)
+            {
+                out << "\n    " << (100.0 * sorted[i].first / std::max(1, samples)) << "%  " << sorted[i].second;
+            }
+            SOTC_INFO(Ee, out.str());
+        };
+        report("profile self", self);
+        report("profile inclusive", inclusive);
+    }
+
+    void startFromEnvironment(PS2Runtime *runtime)
+    {
+        g_runtime = runtime;
+        if (const char *profile = std::getenv("SOTC_PROFILE"))
+        {
+            const std::string spec(profile);
+            const size_t colon = spec.find(':');
+            const int delay = colon == std::string::npos ? 0 : std::atoi(spec.substr(0, colon).c_str());
+            const int duration = std::atoi(colon == std::string::npos ? spec.c_str() : spec.substr(colon + 1).c_str());
+            g_running.store(true);
+            std::thread(profileLoop, delay, std::max(1, duration)).detach();
+            SOTC_INFO(Boot, "profiling GameThread for " << duration << "s after " << delay << "s");
+        }
         const char *value = std::getenv("SOTC_WATCHDOG");
         if (!value)
         {

@@ -10,6 +10,7 @@
 #include <cstdlib>
 
 #include <cstring>
+#include <mutex>
 #include <string>
 
 namespace sotc::hle
@@ -110,6 +111,49 @@ namespace sotc::hle
         bool isDiscPath(const std::string &path)
         {
             return path.rfind("cdrom", 0) == 0;
+        }
+
+        std::mutex g_ttyMutex;
+        std::string g_ttyLine[3];
+
+        void writeTty(int fd, const uint8_t *data, size_t size)
+        {
+            std::lock_guard<std::mutex> lock(g_ttyMutex);
+            std::string &line = g_ttyLine[fd];
+            for (size_t i = 0; i < size; ++i)
+            {
+                const char c = static_cast<char>(data[i]);
+                if (c == '\n')
+                {
+                    SOTC_INFO(Game, line);
+                    line.clear();
+                }
+                else if (c != '\r')
+                {
+                    line.push_back(c);
+                }
+            }
+        }
+
+        template <auto Fallback>
+        void writeWithTty(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+        {
+            returnTo(ctx);
+            const int32_t fd = static_cast<int32_t>(getRegU32(ctx, 4));
+            if (fd == 1 || fd == 2)
+            {
+                const uint32_t address = getRegU32(ctx, 5);
+                const uint32_t size = std::min<uint32_t>(getRegU32(ctx, 6), 64u * 1024u);
+                std::string buffer(size, '\0');
+                for (uint32_t i = 0; i < size; ++i)
+                {
+                    buffer[i] = static_cast<char>(rdram[(address + i) & PS2_RAM_MASK]);
+                }
+                writeTty(fd, reinterpret_cast<const uint8_t *>(buffer.data()), buffer.size());
+                setReturnS32(ctx, static_cast<int32_t>(size));
+                return;
+            }
+            Fallback(rdram, ctx, runtime);
         }
 
         void sceGetstatHle(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
@@ -249,6 +293,8 @@ namespace sotc::hle
         const Binding kBindings[] = {
             {0x0010A6C0, "sceOpen", &sceOpenTimed, "fio open via runtime VFS; disc opens block the caller for one field (IOP RPC + seek latency)"},
             {0x00116E88, "sceCdSearchFile", &sceCdSearchFileTimed, "runtime ISO lookup; caller blocks for a modelled seek + directory read (SOTC_CD_SEARCH_FIELDS, default 3)"},
+            {0x00111798, "write", &writeWithTty<ps2_syscalls::fioWrite>, "fd 1/2 go to the [GAME] TTY log, others to the runtime VFS"},
+            {0x0010AF78, "sceWrite", &writeWithTty<ps2_syscalls::fioWrite>, "fd 1/2 go to the [GAME] TTY log, others to the runtime VFS"},
             {0x0010AD08, "sceRead", &sceReadTimed, "fio read via runtime VFS; caller blocks for modelled DVD transfer time (SOTC_DVD_RATE)"},
             {0x0010C2A8, "sceGetstat", &sceGetstatHle, "fio RPC 12 served from the runtime VFS (ISO/host); disc paths block one field"},
             {0x0010B978, "sceMkdir", &forward<ps2_syscalls::fioMkdir>, "fio via runtime VFS"},

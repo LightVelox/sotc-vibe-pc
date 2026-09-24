@@ -92,9 +92,31 @@ namespace sotc
             return;
         }
         const uint32_t address = static_cast<uint32_t>(std::stoul(spec.substr(0, colon), nullptr, 16));
-        const std::string path = spec.substr(colon + 1);
+        std::string path = spec.substr(colon + 1);
+        uint32_t whenAddress = 0;
+        uint32_t whenValue = 0;
+        bool conditional = false;
+        const size_t when = path.find(":when=");
+        if (when != std::string::npos)
+        {
+            const std::string condition = path.substr(when + 6);
+            path = path.substr(0, when);
+            const size_t eq = condition.find('=');
+            whenAddress = static_cast<uint32_t>(std::stoul(condition.substr(0, eq), nullptr, 16));
+            whenValue = static_cast<uint32_t>(std::stoul(condition.substr(eq + 1), nullptr, 16));
+            conditional = true;
+        }
         auto done = std::make_shared<std::atomic<bool>>(false);
-        FunctionHooks::instance().observeEntry(address, "ramdump", [address, path, done](uint8_t *rdram, R5900Context *, PS2Runtime *) {
+        FunctionHooks::instance().observeEntry(address, "ramdump", [address, path, done, conditional, whenAddress, whenValue](uint8_t *rdram, R5900Context *, PS2Runtime *) {
+            if (conditional)
+            {
+                uint32_t current = 0;
+                std::memcpy(&current, rdram + (whenAddress & PS2_RAM_MASK), sizeof(current));
+                if (current != whenValue)
+                {
+                    return;
+                }
+            }
             if (done->exchange(true))
             {
                 return;

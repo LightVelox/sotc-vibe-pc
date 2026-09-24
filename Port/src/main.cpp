@@ -5,6 +5,7 @@
 #include "sotc/module_guard.h"
 #include "sotc/watchdog.h"
 #include "sotc/hle/sce_fileio.h"
+#include "sotc/hle/sce_cdvd.h"
 #include "sotc_layout_generated.h"
 
 #include <cstdlib>
@@ -126,10 +127,11 @@ int main(int argc, char *argv[])
         sotc::installEeFloatingPointMode(runtime, runtime.cpu().pc);
         sotc::installModuleGuards(runtime);
         sotc::hle::installSceFileIo(runtime);
+        sotc::hle::installSceCdvd(runtime);
         sotc::installCallTracesFromEnvironment(runtime);
         sotc::FunctionHooks::instance().logBindings();
 
-        sotc::watchdog::startFromEnvironment();
+        sotc::watchdog::startFromEnvironment(&runtime);
         SOTC_INFO(Boot, "starting guest at 0x" << std::hex << runtime.cpu().pc);
         runtime.run();
         SOTC_INFO(Boot, "runtime exited");

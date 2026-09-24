@@ -1,4 +1,5 @@
 #include "ps2_runtime.h"
+#include "runtime/gs/gs_threaded_backend.h"
 #include "sotc/function_hooks.h"
 #include "sotc/game_disc.h"
 #include "sotc/log.h"
@@ -102,6 +103,8 @@ int main(int argc, char *argv[])
     paths.cdImage = std::filesystem::absolute(iso);
     std::error_code error;
     std::filesystem::create_directories(paths.mcRoot, error);
+
+    GSThreadedBackend::SetEnabledByDefault(true);
 
     try
     {

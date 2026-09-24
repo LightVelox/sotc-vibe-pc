@@ -6,11 +6,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <vector>
 #include <algorithm>
 #include <sstream>
+#include <string>
 #include <thread>
 
 #if defined(_WIN32)
@@ -231,10 +233,13 @@ namespace sotc::watchdog
         std::map<std::string, int> self;
         std::map<std::string, int> inclusive;
         int samples = 0;
+        std::wstring threadName = L"GameThread";
+        if (const char *name = std::getenv("SOTC_PROFILE_THREAD"))
+            threadName.assign(name, name + std::strlen(name));
         const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(durationSeconds);
         while (std::chrono::steady_clock::now() < end && g_running.load())
         {
-            const auto frames = captureThreadStack(L"GameThread", 40);
+            const auto frames = captureThreadStack(threadName.c_str(), 40);
             if (!frames.empty())
             {
                 ++samples;

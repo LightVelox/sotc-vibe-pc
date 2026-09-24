@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-24. Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
+Last updated: 2026-09-24 (GS thread and new rasterizer). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 
 ## Working
 
@@ -66,6 +66,25 @@ Last updated: 2026-09-24. Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
   matrix on the menu). `VF00` is now part of the `R5900Context` reset state. Side effects: the menu no
   longer draws the solar-flare pass (the frustum test fails, as in PCSX2) and runs at ~7.4 fields/s
   instead of 4.5 (1.7 on the 50/60 Hz menu); boot reaches the SCEE logo at ~112 s instead of ~165 s.
+* **GS pipeline (2026-09-24, fifth session)**: the frontend feeds a `GSThreadedBackend` (own thread
+  `GSThread`, enabled by the port executable; `PS2X_GS_THREAD=0` turns it off) wrapping `GSCpuBackend`.
+  Every call that observes GS results drains the queue first: FINISH/SIGNAL/LABEL, local->host reads,
+  `ReadVram`/`SnapshotVram`/`ClearFramebuffer`, presentation, GS trace dumps and the recorder. Commands
+  carry the producer's MXCSR, so the GS thread rasterizes under the EE rounding mode like before.
+  `GSCpuBackend` got a new rasterizer (`gs_cpu_raster.cpp`, `gs_swizzle.h`): swizzle through page tables
+  split into row/column parts, per-draw decoded pixel state (alpha-test table and CLUT palette cached
+  across draws), sprite and triangle paths that evaluate exactly the same float expressions as the old
+  per-pixel code (hoisted per row/column), a bilinear lerp on 4 channels at once with an `lround`
+  replacement proven identical to the CRT for every float |v| <= 1024 in both rounding modes
+  (`gs_replay --check-lround`), and band-parallel rasterization over row bands (`GSBandPool`,
+  `PS2X_GS_BANDS=n`, default hardware threads - 4, max 8). The texture page cache keeps the old
+  stale-until-TEXFLUSH semantics but copies a page only when something writes it (copy-on-write). Draws
+  whose sampled texture pages overlap their written pages, invalid formats and the pixel-independent
+  CT32 fill fall back to the old per-pixel code (`PS2X_GS_FAST=0` forces it for everything); P4 targets,
+  overlapping frame/Z buffers and draws that start on a stale cache page run on one thread. Output is bit-identical to the previous
+  rasterizer: five recorded scenes (language menu, 50/60 Hz menu, loading, SCEE logo, cloud cutscene;
+  52k draws) replay with a VRAM hash compared after every command, with 1..12 band threads, and the game
+  itself produces the same VRAM checkpoints as the recordings.
 * **EE FPU / VU0 macro semantics**: saturation instead of Inf/NaN, EE divide by zero, `sqrt(|x|)`,
   `VRSQRT = fs/sqrt(|ft|)`, `CVT.W.S` saturation; MXCSR round-toward-zero + FTZ/DAZ on the game thread.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
@@ -82,6 +101,21 @@ Last updated: 2026-09-24. Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
   and `SOTC_TRACE_CALLS` prints `$f12`-`$f15`; `PS2X_GS_TRACE_DUMP_DRAW=n` also dumps VRAM
   after the n-th traced draw to `file.vram.draw`. `Tools/gstrace_summary.py <trace> [vsync]` collapses
   draws; `Tools/gs_vram.py` decodes CT32/PSMT4 regions of a VRAM dump to PNG.
+* **GS recordings and golden replay**: `PS2X_GS_RECORD=first:count:file[;first:count:file...]` records
+  every backend command (draw batches bit for bit, CLUT loads, transfers, uploads, TEXFLUSH, MXCSR
+  changes) plus the backend state and full VRAM at the start and at each field; `PS2X_GS_RECORD_HASH=1`
+  adds a VRAM hash after every command, `PS2X_GS_RECORD_CHECKPOINTS=i,j,...` full checkpoints after
+  given commands. The golden set lives in `Analysis/oracle/gs_golden/` (git-ignored): `menu_language`
+  (fields 250-254), `menu_hz` (320-323), `loading` (540-543), `logo` (900-904), `cutscene` (1360-1364),
+  recorded with pad script `290v:cross,375v:cross,770v:down,800v:cross`. `ps2x_tests` replays them through
+  the old rasterizer (kept as `ps2xTest/gs_reference`), `GSCpuBackend` and the threaded GS
+  (`PS2X_GS_GOLDEN_DIR` overrides the folder). `ps2xTest/tools/gs_replay <file.gsr>` checks one recording
+  (`--backend cpu|ref|thread`, `--no-compare --repeat N` for timing, `--profile` per draw state with
+  fallback counts, `--sample` for a line-level sampling profile, `--lockstep` for the first command where
+  a backend diverges from the reference, `--text out.txt` for the `PS2X_GS_TRACE` text format;
+  `PS2X_GS_GOLDEN_DUMP=prefix` writes expected/actual VRAM on a mismatch). The text trace alone cannot
+  drive an exact replay (coordinates are printed with two decimals).
+  `SOTC_PROFILE_THREAD=GSThread` makes `SOTC_PROFILE` sample the GS thread instead of the game thread.
 * **PCSX2 oracle**: `Tools/pine.py trap` parks PCSX2's EE at an exact address (after the ELF/modules are
   in memory) and dumps RAM; `Tools/compare_ram.py` diffs dumps per module section;
   `Tools/win/capture_window.ps1` captures native or PCSX2 frames. GS dumps: start
@@ -94,12 +128,16 @@ Last updated: 2026-09-24. Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 
 ## Partially working
 
-* Rendering: the software GS rasterizer draws the menu correctly but slowly. Measured 2026-09-24:
-  ~18 fields/s while loading, ~4.5 fields/s on the menu (before the VF00 fix; ~7.4 after it), ~4.6 on the
-  SCEE logo scene and ~0.9 on the cloud cutscene. Menu profile (`SOTC_PROFILE`): 80% of game-thread
-  time under `GS::processGIFPacket` -> `GSCpuBackend` (sprites 47% incl., triangles 32% incl., texture
-  sampling 32%, `WritePixel` 22%); `advanceEeTimers` ~6%, `iosRecvMsg` ~7%. A native menu frame is ~10.5 M
-  pixel operations, most of them from the solar-flare pass that the VF00 fix removed.
+* Speed (fields/s, PAL target 50), before -> after the GS thread + new rasterizer (2026-09-24):
+  loading ~18 -> ~25-28, language menu ~7.4 -> ~24.7, 50/60 Hz menu ~8 -> ~20.6, SCEE logo ~5 -> ~18-19,
+  cloud cutscene ~0.9-1.0 -> ~1.2-1.4. The language menu now appears at ~10 s, the logo at ~45 s and the
+  cutscene at ~77 s (was ~19 / ~95 / ~176 s). Replaying the recordings (Release build, 4 fields each):
+  menu 0.165 -> 0.019 s, logo 0.53 -> 0.065 s, cutscene 1.38 -> 0.26 s. Remaining bottlenecks are no
+  longer the rasterizer: on the cutscene the GS thread idles ~78% while the game thread spends ~88% in
+  `VU1Interpreter::run` (cloud geometry microcode); on the logo the game thread waits ~67% for FINISH
+  and the GS thread is ~72% busy; the ~4.5 fields/s phase between the 50/60 Hz menu and the logo
+  (fields ~510-580) has an idle GS and >50% of game-thread time in C++ exception unwinding
+  (`EeScheduler::blockCurrent` from `SleepThread`/`iosRecvMsg`).
   Boot is ~2× faster than before (MANAGER at 3.5–4 s, GAMECORE at 6–7 s) after batching IOP execution
   and making scheduler snapshots lazy.
 * Loading spinner blinking: at the end of the loading screen the game's frame loop drifts against VSync
@@ -114,7 +152,7 @@ Last updated: 2026-09-24. Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 
 | Area | Blocker | Plan |
 |---|---|---|
-| Rendering speed | Per-pixel scalar software GS (`GSCpuBackend`) is 80% of game-thread time on the menu and runs synchronously on the game thread | recommended: GS on its own thread, then a rewritten software rasterizer (per-draw setup, edge-function/span triangles, sprite fast paths, direct swizzle tables), then band-parallel rasterization; GPU backend later behind `GSRasterBackend` |
+| Emulation speed | Cutscene: `VU1Interpreter::run` is ~88% of the game thread; loading phase before the logo: C++ exceptions in `EeScheduler::blockCurrent` >50%; logo: still GS-bound (FINISH waits) | VU1: profile the interpreter (`commitReadyPipelines`, `execUpper`, `advanceOneCycle` dominate) or recompile the VU1 microcode; scheduler: block/resume guest threads without throwing; rasterizer: specialised inner loops for the hot states if the logo/menu need more |
 | Audio | `sg2iop_driver` drives SPU2 through LIBSD imports; runtime has no IOP-side SPU2 | SPU2 register model on the IOP side feeding a host mixer |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
@@ -180,17 +218,27 @@ No game function is stubbed with placeholder return values.
   (`[0x014778AC] == -1`, set at the end of `st_reloadtask` `0x01367398`). Upstream `sceCdRead` still has an
   "alternative argument order" fallback that can write to arbitrary addresses on unresolved reads; worth
   removing when it bites.
+* The GS rasterizer inherits the game thread's MXCSR (round toward zero + FTZ + DAZ, needed for the EE
+  FPU). Its float barycentrics/UV interpolation therefore truncate, which produces horizontal stripes in
+  the upper-right triangle of full-screen bilinear quads (logo scene sky). The golden recordings contain
+  this behaviour; the GS thread and band workers replay the producer's MXCSR to keep it. The GS source
+  files are compiled with `/fp:precise` (Release otherwise uses `/fp:fast`, which contracts multiply-adds
+  differently per binary; the game build is RelWithDebInfo and never used `/fp:fast`).
+* The GS texture page cache is intentionally stale until TEXFLUSH (tests in `ps2xTest/gs_cache`); a few
+  draws per frame (bloom chain) really read stale texels, so any new rasterizer must model it exactly.
 * IOP import map: `sg2iop_driver` → libsd, sifcmd, sysclib, thbase; `DS1O_D` → sio2man, sio2d, dbcman;
   `MC2_D` → sio2man, sio2d, dbcman, secrman, cdvdman.
 
 ## Next priorities
 
-1. Rendering performance (~7.4 fields/s on the menu, ~0.9 on the cloud cutscene; disc throughput is capped
-   by the field rate because the drive model completes reads on field boundaries): GS on its own thread,
-   rewritten software rasterizer, then band-parallel rasterization (see blockers).
+1. Emulation speed outside the rasterizer (see blockers): VU1 interpreter on the cloud cutscene (~1.3
+   fields/s), exception-based thread blocking in `EeScheduler` during loading. The disc throughput is still
+   capped by the field rate (drive model completes reads on field boundaries).
 2. Compare the opening cutscene with a PCSX2 GS dump draw for draw (clouds, hawk, cliffs); re-check the
-   menu against PCSX2 now that the solar flare is gone (the faint stripes and the TEX1.K difference may
-   have had the same cause).
+   menu against PCSX2 now that the solar flare is gone. The faint horizontal stripes on full-screen
+   bilinear quads come from the rasterizer's float barycentrics under the EE's round-toward-zero MXCSR
+   (see discoveries); fixing them is a deliberate output change (e.g. fixed-point GS interpolation checked
+   against PCSX2) and needs new golden recordings.
 3. VU0 register file is per context (each thread/handler has its own copy); on the PS2 it is shared.
    Harmless so far, revisit if a game thread relies on another thread's VU0 state.
 4. Memory card on SIO2 ports 2/3.

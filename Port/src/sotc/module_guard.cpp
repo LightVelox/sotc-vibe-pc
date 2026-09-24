@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <iomanip>
 #include <memory>
@@ -96,23 +97,37 @@ namespace sotc
         uint32_t whenAddress = 0;
         uint32_t whenValue = 0;
         bool conditional = false;
+        bool whenNotEqual = false;
+        double afterSeconds = 0.0;
+        const size_t after = path.find(":after=");
+        if (after != std::string::npos)
+        {
+            afterSeconds = std::stod(path.substr(after + 7));
+            path = path.substr(0, after);
+        }
         const size_t when = path.find(":when=");
         if (when != std::string::npos)
         {
             const std::string condition = path.substr(when + 6);
             path = path.substr(0, when);
             const size_t eq = condition.find('=');
-            whenAddress = static_cast<uint32_t>(std::stoul(condition.substr(0, eq), nullptr, 16));
+            whenNotEqual = eq > 0 && condition[eq - 1] == '!';
+            whenAddress = static_cast<uint32_t>(std::stoul(condition.substr(0, whenNotEqual ? eq - 1 : eq), nullptr, 16));
             whenValue = static_cast<uint32_t>(std::stoul(condition.substr(eq + 1), nullptr, 16));
             conditional = true;
         }
         auto done = std::make_shared<std::atomic<bool>>(false);
-        FunctionHooks::instance().observeEntry(address, "ramdump", [address, path, done, conditional, whenAddress, whenValue](uint8_t *rdram, R5900Context *, PS2Runtime *) {
+        const auto start = std::chrono::steady_clock::now();
+        FunctionHooks::instance().observeEntry(address, "ramdump", [address, path, done, conditional, whenNotEqual, whenAddress, whenValue, afterSeconds, start](uint8_t *rdram, R5900Context *, PS2Runtime *) {
+            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < afterSeconds)
+            {
+                return;
+            }
             if (conditional)
             {
                 uint32_t current = 0;
                 std::memcpy(&current, rdram + (whenAddress & PS2_RAM_MASK), sizeof(current));
-                if (current != whenValue)
+                if ((current != whenValue) != whenNotEqual)
                 {
                     return;
                 }
@@ -180,7 +195,8 @@ namespace sotc
                 {
                     SOTC_INFO(Ee, "call #" << n << " 0x" << std::hex << address << " a0=" << getRegU32(ctx, 4) << " a1=" << getRegU32(ctx, 5)
                                           << " a2=" << getRegU32(ctx, 6) << " a3=" << getRegU32(ctx, 7) << " ra=" << getRegU32(ctx, 31)
-                                          << " sp=" << getRegU32(ctx, 29));
+                                          << " sp=" << getRegU32(ctx, 29) << std::dec << " f12=" << ctx->f[12] << " f13=" << ctx->f[13]
+                                          << " f14=" << ctx->f[14] << " f15=" << ctx->f[15]);
                 }
             });
         }

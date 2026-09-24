@@ -35,8 +35,28 @@ Last updated: 2026-09-24. Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 * **Language menu renders correctly** (content matches a PCSX2 GS dump draw for draw): green
   background, five labels with drop shadow, cursor. Fixed on the way: VIF1 `DIRECT` IMAGE continuation
   (the font/CLUT uploads were corrupted and swallowed the following packets) and exact depth for
-  flat-Z triangles (float barycentrics dropped pixels under `ZTST=GEQUAL`). Presentation is still wrong
-  (see blockers).
+  flat-Z triangles (float barycentrics dropped pixels under `ZTST=GEQUAL`).
+* **Presentation follows the PS2 CRTC** (`GSCpuBackend::PresentFromLocalMemory`): both circuits from
+  PMODE/DISPFB/DISPLAY (DX/DY/DW/DH, MAGH/MAGV, DBX/DBY), union of the display rectangles, circuit 2 or
+  BGCOLOR as the base and circuit 1 blended by `ALP` (MMOD=1) or pixel alpha (MMOD=0); SMODE2 INT+FFMD=0
+  weaves the full frame, INT+FFMD=1 halves the buffer height. No substitution heuristics: the upstream
+  preferred-source and "black display -> show a context frame" fallbacks are gone from presentation. The host
+  window (640x480 default) shows the frame at 4:3 with bilinear filtering and resizes its texture to the
+  frame. The menu/loading setup (PMODE 0x8023, both circuits on the same 512x512 CT24 buffer, circuit 2 one
+  line lower, ALP 0x80) is the game's de-flicker filter and is reproduced (512x513 output). Verified with
+  window captures: the loading spinner stays in place for the whole loading screen and the menu framing
+  matches PCSX2. The NTSC->PAL switch is followed because the registers are read every field.
+* **Boot flow past the menus**: language menu -> 50/60 Hz choice -> loading -> "No memory card" screen
+  (Retry/Continue) -> Continue -> "Sony Computer Entertainment Europe presents" over the real-time 3D opening
+  scene (Agro, cliffs, fog, bloom), matching a PCSX2 capture closely. Two fixes were needed:
+  * **GS interrupt (INTC 0)**: the runtime never raised it. The game's GP thread unmasks FINISH (IMR 0xFD00)
+    and counts GS FINISH interrupts (`sub_001BE618` -> GP-finish callback `sub_01356E08` -> counter
+    `0x014770E8`); `st_reloadtask` waits on that counter (`st_WaitGPFinish`) and hung forever after the
+    50 Hz choice. `EeScheduler` now raises cause 0 whenever a CSR event (SIGNAL/FINISH/HSINT/VSINT/EDWINT)
+    becomes pending with its IMR bit clear; CSR bits 0-4 are write-1-to-clear and VSINT is set at VBlank.
+  * **`sceCdReadIOPm`** was an alias of `sceCdRead` and wrote sound data (PS-ADPCM) meant for IOP address
+    0x100000 over the EE boot image at 0x00100000 (code and `.rodata`), which later crashed `vfprintf`
+    through its corrupted jump table. It now reads into IOP RAM and uses the same drive timing model.
 * **EE FPU / VU0 macro semantics**: saturation instead of Inf/NaN, EE divide by zero, `sqrt(|x|)`,
   `VRSQRT = fs/sqrt(|ft|)`, `CVT.W.S` saturation; MXCSR round-toward-zero + FTZ/DAZ on the game thread.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
@@ -47,40 +67,46 @@ Last updated: 2026-09-24. Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
   (`SOTC_DUMP_RAM_AT=addr:file[:when=addr=value]`), missing guest functions stop the run.
 * **GS diagnostics**: `PS2X_GS_TRACE=firstVsync:count:file` writes every draw (`D`, full context
   state + vertices), transfer (`T`), image payload (`I`, hex) and field (`V`, PMODE/DISPFB/DISPLAY) and
-  dumps raw VRAM at the start of the window to `file.vram`; `PS2X_GS_TRACE_DUMP_DRAW=n` also dumps VRAM
+  dumps raw VRAM at the start of the window to `file.vram`; `SOTC_DUMP_RAM_AT` also takes `:after=seconds`
+  and `SOTC_TRACE_CALLS` prints `$f12`-`$f15`; `PS2X_GS_TRACE_DUMP_DRAW=n` also dumps VRAM
   after the n-th traced draw to `file.vram.draw`. `Tools/gstrace_summary.py <trace> [vsync]` collapses
   draws; `Tools/gs_vram.py` decodes CT32/PSMT4 regions of a VRAM dump to PNG.
 * **PCSX2 oracle**: `Tools/pine.py trap` parks PCSX2's EE at an exact address (after the ELF/modules are
   in memory) and dumps RAM; `Tools/compare_ram.py` diffs dumps per module section;
   `Tools/win/capture_window.ps1` captures native or PCSX2 frames. GS dumps: start
   `Tools/pcsx2-oracle/pcsx2-qt.exe -batch -fastboot -- <iso>`, focus it and press Shift+F8 (single-frame
-  dump into `Tools/pcsx2-oracle/snaps/`, uncompressed); `Tools/gsdump.py <dump> --out trace.txt --vram
+  dump into `Tools/pcsx2-oracle/snaps/`, uncompressed; Ctrl+Shift+F8 has to be *held* for a multi-frame
+  dump, e.g. with `keybd_event` key-down/key-up); `Tools/gsdump.py <dump> --out trace.txt --vram
   vram.bin --screenshot shot.png` converts it to the same trace format (VRAM is at offset 0x1A9 of the
-  version-9 state). The language menu is up ~25 s after launch in PCSX2, ~60 s natively.
+  version-9 state; one `V` line per VSync). In PCSX2 (`-fastboot`) the loading spinner is up at ~4-8 s
+  and the language menu at ~8.5 s; natively the spinner shows at ~2-18 s and the menu at ~19 s.
 
 ## Partially working
 
-* Rendering: the software GS rasterizer draws the menu correctly but slowly (~5 fields/s on the menu,
-  ~80% of game-thread time in `GSCpuBackend`, mostly full-screen textured sprites of the bloom chain).
+* Rendering: the software GS rasterizer draws the menu correctly but slowly. Measured 2026-09-24:
+  ~18 fields/s while loading, ~4.5 fields/s on the menu. Menu profile (`SOTC_PROFILE`): 80% of game-thread
+  time under `GS::processGIFPacket` -> `GSCpuBackend` (sprites 47% incl., triangles 32% incl., texture
+  sampling 32%, `WritePixel` 22%); `advanceEeTimers` ~6%, `iosRecvMsg` ~7%. A native menu frame is ~10.5 M
+  pixel operations, most of them from the solar-flare pass that PCSX2 does not draw (see blockers).
   Boot is ~2× faster than before (MANAGER at 3.5–4 s, GAMECORE at 6–7 s) after batching IOP execution
   and making scheduler snapshots lazy.
-* Presentation: the window shows the 512-pixel-wide framebuffer unscaled inside a 640×448 view (black
-  side bars), instead of the DISPLAY rectangle (DISPFB1 FBW=8 PSMCT24 at 0, DISPLAY 2560/5 × 512,
-  SMODE2=1 interlaced frame mode) scaled to 4:3. During loading the spinner (bottom right) blinks
-  every other frame and jumps upwards for a while; in PCSX2 it stays put. Likely causes: the game
-  switches `SetGsCrt` from NTSC (mode 2) to PAL (mode 3) mid-boot and the presenter ignores
-  DISPLAY/DISPFB/PMODE, plus `GS::updatePreferredDisplaySourceForDraw` (an upstream heuristic that picks
-  a "preferred" source buffer from a 640×448 copy pattern) and the double-buffer choice. Not yet
-  confirmed with a trace.
+* Loading spinner blinking: at the end of the loading screen the game's frame loop drifts against VSync
+  (odd fields end with "copy scene -> display, clear scene", even fields start by copying the just-cleared
+  scene), so every other field shows a black display buffer. A multi-frame PCSX2 GS dump shows the same
+  sequence (V39-V73), so this is game behaviour: on the PS2 it lasts ~0.7 s at 50 fields/s and reads as a
+  dimmed spinner; natively it lasts ~2.6 s at a few fields/s and is visible as blinking. It shrinks with
+  rendering speed. The former "spinner jumps up" was the removed black-display fallback showing the 416-line
+  scene buffer unscaled.
 
 ## Known blockers
 
 | Area | Blocker | Plan |
 |---|---|---|
-| Rendering speed | Per-pixel scalar software GS (`GSCpuBackend`) dominates frame time | Hardware GS backend behind a renderer interface, or a SIMD/tiled software rasterizer; profile-driven |
-| Presentation | `DISPLAY`/`DISPFB`/`PMODE`/`SMODE2` not applied; spinner blinks/moves during loading | present what the CRTC would scan out (both circuits, DBX/DBY, magnification, interlace) scaled to 4:3; compare with PCSX2 screenshots during loading |
+| Rendering speed | Per-pixel scalar software GS (`GSCpuBackend`) is 80% of game-thread time on the menu and runs synchronously on the game thread | recommended: GS on its own thread, then a rewritten software rasterizer (per-draw setup, edge-function/span triangles, sprite fast paths, direct swizzle tables), then band-parallel rasterization; GPU backend later behind `GSRasterBackend` |
+| Opening cutscene | After the SCEE logo scene the screen turns flat slate grey (30,40,45) for ~100 s, then black; PCSX2 shows the cloud/hawk cutscene there | GS-trace that phase and diff with a PCSX2 GS dump (cloud rendering, fades, or a missing event) |
+| Camera math | On the menu the camera context (index 1, `0x01301760`) differs from PCSX2: the view matrix (+0x150..+0x1C0) holds `FLT_MAX` where PCSX2 has 1.0, and the screen distance (+0x0C, +0xC0) is 208 instead of 502.2 (= 208 / tan 22.5). The saturated view x projection (+0x5A0) makes `solarFlare` (`0x01196EA0`, mode 2 -> `sub_011952E0`) pass its frustum test, so the game draws 160 full-screen light-ray fans plus a bloom chain (FBP 0x150/0x1B8/0x1D8/0x1E0/0x1FE) that PCSX2 skips; this also causes the faint stripes on the menu. The generated `iosGetTanf`/`iosGetSinCosf` code and the VU0 sin/cos coefficients look correct | find the writers of the 208 and of the view matrix (`update_camera_context` `0x01257CA8`, `get_view_matrix`) and diff their inputs against PCSX2 with `SOTC_DUMP_RAM_AT=...:after=N` + `pine.py trap`; affects every 3D camera |
 | Audio | `sg2iop_driver` drives SPU2 through LIBSD imports; runtime has no IOP-side SPU2 | SPU2 register model on the IOP side feeding a host mixer |
-| Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device" | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
+| Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
 | FMV | FFmpeg disabled | decide decoder strategy |
 | Remaining EE overhead | `advanceEeTimers` per dispatch (~5%), 8 EE cycles counted per recompiled-function dispatch | batch timer updates; revisit cycle accounting once rendering is fast |
@@ -135,17 +161,27 @@ No game function is stubbed with placeholder return values.
   (`DIRECT 1` = IMAGE tag, then `DIRECT n` in the REF tag's TTE word = pixels).
 * The game's TEX1.K for the menu text differs from PCSX2 (0xFEC vs 0xFCE); harmless here because both
   select magnification, but it points at an EE float difference worth checking later.
+* Solar flare: `solarFlare` (`0x01196EA0`) switches on `0x0128FE70` (1 -> `sub_01193A78`, 2 ->
+  `sub_011952E0`; PCSX2 and native both have 2, colour d0c498). `sub_011952E0` projects the sun direction
+  (`0x01296320`, z = sqrt(1-x^2-y^2), x40000) through `get_cur_camera_context()+0x5A0` and draws only if
+  |x/w|, |y/w| < 1.07 and z/w > 0. Camera contexts: index at `0x012939B4`, table at `0x01334200`.
+* Boot game flow (`st_gameflow` `0x01361858`): `languageMenuLoad` -> `bootChooseLangScript` -> wait
+  `menuSelected` -> `bootSelectDisplayMode` -> `commonDataLoad` -> loop until `gcCheckStageLoadFinish`
+  (`[0x014778AC] == -1`, set at the end of `st_reloadtask` `0x01367398`). Upstream `sceCdRead` still has an
+  "alternative argument order" fallback that can write to arbitrary addresses on unresolved reads; worth
+  removing when it bites.
 * IOP import map: `sg2iop_driver` → libsd, sifcmd, sysclib, thbase; `DS1O_D` → sio2man, sio2d, dbcman;
   `MC2_D` → sio2man, sio2d, dbcman, secrman, cdvdman.
 
 ## Next priorities
 
-1. Presentation: apply DISPLAY/DISPFB/PMODE/SMODE2 (including the NTSC→PAL switch) and fix the loading
-   spinner (blinking, jumping) against PCSX2 screenshots; remove/replace the preferred-source heuristic.
-2. Rendering performance: the software GS is the limiter (~5 fields/s on the menu). Options: tiled
-   multi-threaded rasterizer with fast paths for the bloom sprites, or a GPU backend behind the existing
-   `GSRasterBackend` interface.
-3. Memory card on SIO2 ports 2/3 (the screens after the language menu depend on it).
-4. Audio: SPU2 on the IOP side.
-5. Sub-field timed waits in the scheduler; calibrate disc timing against PCSX2; IOP VBlank at the PAL rate.
-6. argv, kernel object ID numbering.
+1. Opening cutscene after the SCEE logo shows a flat grey screen (see blockers).
+2. Camera math divergence (view matrix `FLT_MAX`, screen distance 208 vs 502.2): wrong for every 3D
+   camera and the reason the menu draws the solar flare.
+3. Rendering performance (~4.5 fields/s on the menu; disc throughput is capped by the field rate because
+   the drive model completes reads on field boundaries): GS on its own thread, rewritten software
+   rasterizer, then band-parallel rasterization (see blockers).
+4. Memory card on SIO2 ports 2/3.
+5. Audio: SPU2 on the IOP side.
+6. Sub-field timed waits in the scheduler; calibrate disc timing against PCSX2; IOP VBlank at the PAL rate.
+7. argv, kernel object ID numbering.

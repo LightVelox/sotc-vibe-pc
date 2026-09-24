@@ -246,12 +246,12 @@ def main():
         elif kind == 1:
             o += 1
             tick += 1
+            out.write(vline(regs))
         elif kind == 2:
             o += 4
         elif kind == 3:
             regs = d[o:o + 8192]
             o += 8192
-            out.write(vline(regs))
         else:
             sys.exit("unknown packet %d at %d" % (kind, o - 1))
 

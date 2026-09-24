@@ -49,12 +49,14 @@ namespace sotc::hle
             ctx->pc = getRegU32(ctx, 31);
         }
 
+        template <auto Original>
         void sceCdReadTimed(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
         {
             returnTo(ctx);
             const uint32_t lsn = getRegU32(ctx, 4);
             const uint32_t sectors = getRegU32(ctx, 5);
-            ps2_stubs::sceCdRead(rdram, ctx, runtime);
+            const uint32_t buffer = getRegU32(ctx, 6);
+            Original(rdram, ctx, runtime);
             const int32_t result = static_cast<int32_t>(getRegU32(ctx, 2));
             if (result == 0 || bytesPerSecond() <= 0.0)
             {
@@ -72,7 +74,7 @@ namespace sotc::hle
             g_drive.pending = true;
             g_drive.nextSequentialLsn = lsn + sectors;
             ++g_drive.reads;
-            SOTC_TRACE(File, "sceCdRead(lsn=0x" << std::hex << lsn << ", sectors=0x" << sectors << std::dec << ") completes at field "
+            SOTC_TRACE(File, "sceCdRead(lsn=0x" << std::hex << lsn << ", sectors=0x" << sectors << ", buf=0x" << buffer << std::dec << ") completes at field "
                                                 << g_drive.busyUntilField << " (now " << now << ")");
         }
 
@@ -120,8 +122,10 @@ namespace sotc::hle
         };
 
         const Binding kBindings[] = {
-            {0x001DB688, "sceCdRead", &sceCdReadTimed,
+            {0x001DB688, "sceCdRead", &sceCdReadTimed<ps2_stubs::sceCdRead>,
              "runtime ISO read; drive busy for modelled seek + transfer time (SOTC_DVD_RATE, SOTC_DVD_SEEK_FIELDS)"},
+            {0x001DB868, "sceCdReadIOPm", &sceCdReadTimed<ps2_stubs::sceCdReadIOPm>,
+             "runtime ISO read into IOP RAM; same drive model as sceCdRead"},
             {0x00117098, "sceCdSync", &sceCdSyncTimed<ps2_stubs::sceCdSync>,
              "mode 0 blocks the caller until the modelled read completes (>= 1 field); mode 1 polls"},
             {0x00117138, "sceCdSyncS", &sceCdSyncTimed<ps2_stubs::sceCdSyncS>,

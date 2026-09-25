@@ -230,66 +230,213 @@ namespace sotc::watchdog
     void profileLoop(int delaySeconds, int durationSeconds)
     {
         std::this_thread::sleep_for(std::chrono::seconds(delaySeconds));
-        std::map<std::string, int> self;
-        std::map<std::string, int> inclusive;
-        int samples = 0;
+#if defined(_WIN32)
         std::wstring threadName = L"GameThread";
         if (const char *name = std::getenv("SOTC_PROFILE_THREAD"))
             threadName.assign(name, name + std::strlen(name));
-        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(durationSeconds);
-        while (std::chrono::steady_clock::now() < end && g_running.load())
+        HANDLE process = GetCurrentProcess();
+        HANDLE thread = findThreadByDescription(threadName.c_str());
+        if (!thread)
         {
-            const auto frames = captureThreadStack(threadName.c_str(), 40);
-            if (!frames.empty())
+            SOTC_INFO(Ee, "profile: thread not found");
+            return;
+        }
+        std::vector<std::vector<DWORD64>> stacks;
+        {
+            std::lock_guard<std::mutex> lock(g_symbolMutex);
+            if (!g_symbolsReady)
             {
-                ++samples;
-                auto strip = [](const std::string &f) { return f.substr(0, f.find('+')); };
-                ++self[strip(frames.front())];
-                std::vector<std::string> seen;
-                for (const auto &f : frames)
+                SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+                g_symbolsReady = SymInitialize(process, nullptr, TRUE) == TRUE;
+            }
+            const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(durationSeconds);
+            while (std::chrono::steady_clock::now() < end && g_running.load())
+            {
+                if (SuspendThread(thread) == static_cast<DWORD>(-1))
+                    break;
+                CONTEXT context{};
+                context.ContextFlags = CONTEXT_FULL;
+                std::vector<DWORD64> pcs;
+                if (GetThreadContext(thread, &context))
                 {
-                    const std::string name = strip(f);
-                    if (std::find(seen.begin(), seen.end(), name) == seen.end())
+                    STACKFRAME64 frame{};
+                    frame.AddrPC.Offset = context.Rip;
+                    frame.AddrPC.Mode = AddrModeFlat;
+                    frame.AddrFrame.Offset = context.Rbp;
+                    frame.AddrFrame.Mode = AddrModeFlat;
+                    frame.AddrStack.Offset = context.Rsp;
+                    frame.AddrStack.Mode = AddrModeFlat;
+                    for (int i = 0; i < 48; ++i)
                     {
-                        seen.push_back(name);
-                        ++inclusive[name];
+                        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame, &context, nullptr,
+                                         SymFunctionTableAccess64, SymGetModuleBase64, nullptr) ||
+                            frame.AddrPC.Offset == 0)
+                            break;
+                        pcs.push_back(frame.AddrPC.Offset);
                     }
                 }
+                ResumeThread(thread);
+                if (!pcs.empty())
+                    stacks.push_back(std::move(pcs));
+                std::this_thread::sleep_for(std::chrono::microseconds(500));
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-        auto report = [&](const char *title, const std::map<std::string, int> &table)
+        CloseHandle(thread);
+
+        std::map<DWORD64, std::string> names;
+        std::map<DWORD64, std::string> lines;
+        {
+            std::lock_guard<std::mutex> lock(g_symbolMutex);
+            for (const auto &stack : stacks)
+            {
+                for (DWORD64 pc : stack)
+                {
+                    if (names.count(pc))
+                        continue;
+                    const std::string full = symbolize(process, pc);
+                    names[pc] = full.substr(0, full.find('+'));
+                    const size_t paren = full.find(" (");
+                    lines[pc] = names[pc] + (paren == std::string::npos ? std::string() : full.substr(paren));
+                }
+            }
+        }
+        std::map<std::string, int> self;
+        std::map<std::string, int> selfLines;
+        std::map<std::string, int> inclusive;
+        for (const auto &stack : stacks)
+        {
+            ++self[names[stack.front()]];
+            ++selfLines[lines[stack.front()]];
+            std::vector<std::string> seen;
+            for (DWORD64 pc : stack)
+            {
+                const std::string &name = names[pc];
+                if (std::find(seen.begin(), seen.end(), name) == seen.end())
+                {
+                    seen.push_back(name);
+                    ++inclusive[name];
+                }
+            }
+        }
+        const int samples = static_cast<int>(stacks.size());
+        auto report = [&](const char *title, const std::map<std::string, int> &table, size_t count)
         {
             std::vector<std::pair<int, std::string>> sorted;
-            for (const auto &[name, count] : table)
-            {
-                sorted.emplace_back(count, name);
-            }
+            for (const auto &[name, hits] : table)
+                sorted.emplace_back(hits, name);
             std::sort(sorted.rbegin(), sorted.rend());
             std::ostringstream out;
             out << title << " (" << samples << " samples):";
-            for (size_t i = 0; i < sorted.size() && i < 25; ++i)
-            {
+            for (size_t i = 0; i < sorted.size() && i < count; ++i)
                 out << "\n    " << (100.0 * sorted[i].first / std::max(1, samples)) << "%  " << sorted[i].second;
-            }
             SOTC_INFO(Ee, out.str());
         };
-        report("profile self", self);
-        report("profile inclusive", inclusive);
+        report("profile self", self, 30);
+        report("profile self lines", selfLines, 30);
+        report("profile inclusive", inclusive, 40);
+        std::vector<std::pair<int, std::string>> topSelf;
+        for (const auto &[name, hits] : self)
+            topSelf.emplace_back(hits, name);
+        std::sort(topSelf.rbegin(), topSelf.rend());
+        for (size_t i = 0; i < topSelf.size() && i < 10; ++i)
+        {
+            std::map<std::string, int> callers;
+            for (const auto &stack : stacks)
+            {
+                if (names[stack.front()] != topSelf[i].second)
+                    continue;
+                std::string chain;
+                int depth = 0;
+                for (size_t f = 1; f < stack.size() && depth < 3; ++f)
+                {
+                    const std::string &name = names[stack[f]];
+                    if (name == topSelf[i].second || name.rfind("Rtl", 0) == 0 || name.rfind("Mtx_", 0) == 0 || name.rfind("std::", 0) == 0 || name.rfind("operator new", 0) == 0 || name == "malloc" || name == "free")
+                        continue;
+                    chain += (depth ? " <- " : "") + lines[stack[f]];
+                    ++depth;
+                }
+                ++callers[chain];
+            }
+            report(("callers of " + topSelf[i].second).c_str(), callers, 6);
+        }
+#else
+        (void)durationSeconds;
+#endif
+    }
+
+    void timelineLoop(std::string path)
+    {
+        FILE *out = std::fopen(path.c_str(), "w");
+        if (!out)
+        {
+            SOTC_ERROR(Boot, "timeline: cannot open " << path);
+            return;
+        }
+        std::vector<uint32_t> watch;
+        if (const char *spec = std::getenv("SOTC_TIMELINE_WATCH"))
+        {
+            std::stringstream list(spec);
+            std::string item;
+            while (std::getline(list, item, ','))
+                watch.push_back(static_cast<uint32_t>(std::stoul(item, nullptr, 16)));
+        }
+        const uint8_t *rdram = g_runtime->memory().getRDRAM();
+        auto seconds = []()
+        { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); };
+        std::fprintf(out, "start %.6f\n", seconds());
+        uint64_t last = ~0ull;
+        while (g_running.load())
+        {
+            const uint64_t tick = g_runtime->memory().gs().vsyncTick.load();
+            if (tick != last)
+            {
+                last = tick;
+                std::fprintf(out, "%llu %.6f", static_cast<unsigned long long>(tick), seconds());
+                for (uint32_t address : watch)
+                {
+                    uint32_t value = 0;
+                    std::memcpy(&value, rdram + (address & 0x1FFFFFFCu), sizeof(value));
+                    std::fprintf(out, " %08x", value);
+                }
+                std::fprintf(out, "\n");
+                std::fflush(out);
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+        std::fclose(out);
     }
 
     void startFromEnvironment(PS2Runtime *runtime)
     {
         g_runtime = runtime;
+        if (const char *timeline = std::getenv("SOTC_TIMELINE"))
+        {
+            g_running.store(true);
+            std::thread(timelineLoop, std::string(timeline)).detach();
+        }
         if (const char *profile = std::getenv("SOTC_PROFILE"))
         {
-            const std::string spec(profile);
-            const size_t colon = spec.find(':');
-            const int delay = colon == std::string::npos ? 0 : std::atoi(spec.substr(0, colon).c_str());
-            const int duration = std::atoi(colon == std::string::npos ? spec.c_str() : spec.substr(colon + 1).c_str());
+            std::vector<std::pair<int, int>> windows;
+            std::stringstream list{std::string(profile)};
+            std::string spec;
+            while (std::getline(list, spec, ','))
+            {
+                const size_t colon = spec.find(':');
+                const int delay = colon == std::string::npos ? 0 : std::atoi(spec.substr(0, colon).c_str());
+                const int duration = std::atoi(colon == std::string::npos ? spec.c_str() : spec.substr(colon + 1).c_str());
+                windows.emplace_back(delay, std::max(1, duration));
+                SOTC_INFO(Boot, "profiling for " << duration << "s after " << delay << "s");
+            }
             g_running.store(true);
-            std::thread(profileLoop, delay, std::max(1, duration)).detach();
-            SOTC_INFO(Boot, "profiling GameThread for " << duration << "s after " << delay << "s");
+            std::thread([windows]()
+                        {
+                            const auto start = std::chrono::steady_clock::now();
+                            for (const auto &[delay, duration] : windows)
+                            {
+                                std::this_thread::sleep_until(start + std::chrono::seconds(delay));
+                                profileLoop(0, duration);
+                            } })
+                .detach();
         }
         const char *value = std::getenv("SOTC_WATCHDOG");
         if (!value)

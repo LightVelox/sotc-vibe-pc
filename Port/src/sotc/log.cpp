@@ -83,5 +83,6 @@ namespace sotc::log
         std::fprintf(level <= Level::Warn ? stderr : stdout, "[%9.4f][%.*s]%s %.*s\n", seconds,
                      static_cast<int>(name(category).size()), name(category).data(), prefix,
                      static_cast<int>(message.size()), message.data());
+        std::fflush(level <= Level::Warn ? stderr : stdout);
     }
 }

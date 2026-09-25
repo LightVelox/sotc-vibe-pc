@@ -38,10 +38,10 @@ target_include_directories(sotc PRIVATE src "${SOTC_GENERATED_DIR}")
 target_link_libraries(sotc PRIVATE sotc_game_code ps2_runtime)
 
 if(MSVC)
-    target_compile_options(sotc_game_code PRIVATE /bigobj /fp:precise /W0 /MP)
+    target_compile_options(sotc_game_code PRIVATE /bigobj /fp:precise /W0 /MP $<$<CONFIG:RelWithDebInfo>:/Ob2>)
     target_compile_options(sotc PRIVATE /fp:precise /W3 /utf-8)
     target_compile_definitions(sotc PRIVATE _CRT_SECURE_NO_WARNINGS)
-    target_link_options(sotc PRIVATE /FORCE:MULTIPLE /STACK:16777216)
+    target_link_options(sotc PRIVATE /FORCE:MULTIPLE /STACK:16777216 $<$<CONFIG:RelWithDebInfo>:/LTCG>)
 endif()
 
 set_target_properties(sotc PROPERTIES

@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-24 (GS thread and new rasterizer). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
+Last updated: 2026-09-24 (boot-to-cutscene timing vs PCSX2, sixth session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 
 ## Working
 
@@ -85,6 +85,40 @@ Last updated: 2026-09-24 (GS thread and new rasterizer). Target: SCES-53326 v1.0
   rasterizer: five recorded scenes (language menu, 50/60 Hz menu, loading, SCEE logo, cloud cutscene;
   52k draws) replay with a VRAM hash compared after every command, with 1..12 band threads, and the game
   itself produces the same VRAM checkpoints as the recordings.
+* **Boot-to-cutscene timing (2026-09-24, sixth session)**: boot -> language menu -> 50 Hz -> "No memory
+  card" -> SCEE logo -> first cloud-cutscene frame now takes ~33 s of wall time natively (was ~78 s)
+  against ~29.5 s in PCSX2 (`-batch -fastboot`, which spends ~2.5 s in its own startup before the game's
+  VBlank counter starts). Every change below is bit-exact: the five golden recordings match command for
+  command (per-command VRAM hashes, 54k in the cutscene window) in a full game run
+  (`Tools/golden_run.py`), and `ps2x_tests` passes (463 tests).
+  * **No C++ exceptions for blocking syscalls**: generated code now emits
+    `if (!runtime->handleSyscall(...)) return;`. Inside `handleSyscall` the scheduler defers transfers
+    (`EeScheduler::DeferredTransferScope`): `blockCurrent` / `transferIfRequested` set a flag instead of
+    throwing and the native stack unwinds through the normal return path (the same path checkpoints use).
+    No guest instruction and no cycle accounting happens between the block and the dispatcher, so
+    scheduling is identical. Waits entered outside `handleSyscall` (HLE hooks, `waitVSync`,
+    `invokeCurrent`, thread exit) still throw. Tests cover sleep/wakeup and semaphore hand-over through
+    `handleSyscall`.
+  * **Lazy EE timers**: `advanceEeTimers` only accumulates cycles and runs the timer arithmetic when the
+    exact cycle of the next compare/overflow interrupt is reached or a timer register is accessed (the
+    tick/remainder arithmetic composes exactly; a test compares against a read after every step).
+    GIF_STAT.FQC is cleared only if something wrote GIF_STAT since the last advance.
+  * **`processPendingEvents` fast path**: deadlines are examined only when one is cycle-due and the event
+    queue only when the pending flag is set; before, every return to the dispatcher took three locks,
+    read `QueryPerformanceCounter` and allocated a `std::deque`.
+  * **GS FINISH/SIGNAL/LABEL no longer drain the GS thread**: `Sync(Finish)` is queued to the GS thread
+    (the CPU backend's `Sync` is a no-op and every VRAM observation drains by itself), so the EE builds the
+    next frame while the GS thread draws.
+  * **Build flags**: `ps2_runtime` gets `/Ob2 /Oi /GL /Gy /Gw` in RelWithDebInfo and `sotc` links with
+    `/LTCG`; the generated game code is compiled with `/Ob2` (memory-access helpers were not inlined).
+    `/fp:precise` everywhere as before. `/arch:AVX2` for the runtime was measured (no gain) and dropped.
+  * Smaller: lock-free presence bitmap before the syscall-override lookup; the per-call `GsGetIMR` /
+    `GsPutIMR` logs (stdout flush several times per frame) are gone; the VBlank host deadline chain may
+    lag wall time by at most 2 fields (it used to fast-forward to catch up after slow stretches; guest
+    timing is cycle-based and unaffected).
+  * **Pad script is deterministic**: scripted buttons are evaluated when the game reads the pad, from the
+    current field. They used to be sampled by the host render loop, so presses depended on host timing and
+    were lost when the window was occluded.
 * **EE FPU / VU0 macro semantics**: saturation instead of Inf/NaN, EE divide by zero, `sqrt(|x|)`,
   `VRSQRT = fs/sqrt(|ft|)`, `CVT.W.S` saturation; MXCSR round-toward-zero + FTZ/DAZ on the game thread.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
@@ -116,6 +150,21 @@ Last updated: 2026-09-24 (GS thread and new rasterizer). Target: SCES-53326 v1.0
   `PS2X_GS_GOLDEN_DUMP=prefix` writes expected/actual VRAM on a mismatch). The text trace alone cannot
   drive an exact replay (coordinates are printed with two decimals).
   `SOTC_PROFILE_THREAD=GSThread` makes `SOTC_PROFILE` sample the GS thread instead of the game thread.
+  `SOTC_PROFILE` takes several windows (`8:3,31:10`), samples raw PCs (~450 samples/s) and reports self
+  time per function and per source line, inclusive time and the callers of the top functions.
+  `SOTC_TIMELINE=file` logs the wall time of every field (`SOTC_TIMELINE_WATCH=addr,...` adds guest words);
+  `PS2X_TRACE_SCHED=first:last:file` logs every guest thread block/wake/switch/invocation with field and
+  EE cycle.
+* **Boot timing tools**: `Tools/measure_boot.py native|pcsx2 <dir>` runs the game or PCSX2 with the pad
+  script, captures the window (PrintWindow, works when occluded) and, for PCSX2, drives the pad over
+  PostMessage at the same guest VBlank counts and polls over PINE the game's VBlank counter
+  (`0x1DC9D8`, native field - 35) and libcdvd's pending read (`0x130A80` lsn/sectors, busy flag
+  `0x1309B4`). `Tools/boot_milestones.py <dir> native|pcsx2` classifies frames into milestones,
+  `Tools/boot_phases.py <dir> f0,f1,...` prints fields/s between native fields,
+  `Tools/golden_run.py <dir>` records the five golden windows in a game run and
+  `Tools/gsr_compare.py a.gsr b.gsr` compares checkpoints and per-command hashes (struct padding in
+  Submit records differs run to run and is ignored). `0x1DC7AC` looks like a VBlank counter but counts
+  `iosCheckDrawFinish` polls.
 * **PCSX2 oracle**: `Tools/pine.py trap` parks PCSX2's EE at an exact address (after the ELF/modules are
   in memory) and dumps RAM; `Tools/compare_ram.py` diffs dumps per module section;
   `Tools/win/capture_window.ps1` captures native or PCSX2 frames. GS dumps: start
@@ -128,6 +177,17 @@ Last updated: 2026-09-24 (GS thread and new rasterizer). Target: SCES-53326 v1.0
 
 ## Partially working
 
+* Speed after the sixth session (fields/s, native field ranges): boot 0-270 ~51, language/50 Hz menus
+  ~43-45, loading 375-731 ~46, "No memory card" + logo ~41-47, black gap before the cutscene 1133-1329
+  ~27, cloud cutscene still ~1.3 (VU1). Milestones (wall s / game VBlank count, PCSX2 in brackets):
+  language menu 5.9 / 236 (7.4 / 224), "No memory card" 16.2 / 699 (15.9 / 649), logo 18.7 / 807
+  (19.1 / 809), logo end 25.8 / 1097 (24.9 / 1099), first cutscene frame 33.0 / 1294 (29.5 / 1329).
+  What limits the remaining phases is the game's idle thread (`sub_001A8068`, lowest priority): an endless
+  `iosRecvMsg(queue, 0, 0)` poll that makes WaitSema/GetThreadId/SignalSema syscalls. Natively it runs
+  ~51,600 iterations per field (~114 charged EE cycles each; syscalls cost 0 cycles in our model), while
+  the BIOS kernel path is ~250 instructions for WaitSema/SignalSema and ~45 for GetThreadId, i.e. ~600+
+  cycles per iteration on the PS2 (~9-10k iterations per field). It takes 60-70% of the game thread in
+  the logo and pre-cutscene phases.
 * Speed (fields/s, PAL target 50), before -> after the GS thread + new rasterizer (2026-09-24):
   loading ~18 -> ~25-28, language menu ~7.4 -> ~24.7, 50/60 Hz menu ~8 -> ~20.6, SCEE logo ~5 -> ~18-19,
   cloud cutscene ~0.9-1.0 -> ~1.2-1.4. The language menu now appears at ~10 s, the logo at ~45 s and the
@@ -152,12 +212,12 @@ Last updated: 2026-09-24 (GS thread and new rasterizer). Target: SCES-53326 v1.0
 
 | Area | Blocker | Plan |
 |---|---|---|
-| Emulation speed | Cutscene: `VU1Interpreter::run` is ~88% of the game thread; loading phase before the logo: C++ exceptions in `EeScheduler::blockCurrent` >50%; logo: still GS-bound (FINISH waits) | VU1: profile the interpreter (`commitReadyPipelines`, `execUpper`, `advanceOneCycle` dominate) or recompile the VU1 microcode; scheduler: block/resume guest threads without throwing; rasterizer: specialised inner loops for the hot states if the logo/menu need more |
+| Emulation speed | Cutscene: `VU1Interpreter::run` is ~88% of the game thread; menus/logo/pre-cutscene: the idle thread's syscall poll loop (60-70%), see Partially working | VU1: interpreter hot spots or microcode recompilation (ask first); idle loop: charge syscalls their kernel cycle cost (timing change, proposal below) or make each iteration cheaper |
 | Audio | `sg2iop_driver` drives SPU2 through LIBSD imports; runtime has no IOP-side SPU2 | SPU2 register model on the IOP side feeding a host mixer |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
 | FMV | FFmpeg disabled | decide decoder strategy |
-| Remaining EE overhead | `advanceEeTimers` per dispatch (~5%), 8 EE cycles counted per recompiled-function dispatch | batch timer updates; revisit cycle accounting once rendering is fast |
+| EE cycle accounting | 8 EE cycles per recompiled-function dispatch, 32 per loop back-edge, 0 per syscall; the PS2 kernel spends ~45-250 instructions per syscall | calibrate against the BIOS kernel path lengths / PCSX2 (changes emulated timing, needs approval and new goldens) |
 
 ## Temporary hacks / modelled behaviour
 
@@ -165,7 +225,7 @@ Last updated: 2026-09-24 (GS thread and new rasterizer). Target: SCES-53326 v1.0
 |---|---|---|---|
 | FFmpeg disabled (MPEG → stub frames) | root `CMakeLists.txt` | avoid third-party prebuilt downloads during bring-up | FMV strategy decided |
 | HLE bindings for SIF/file/CD/DECI2/TTY/MPEG/IPU | `Port/recomp/sotc.toml`, `Port/src/sotc/hle/` | runtime IOP bridge is API-level | revisit per subsystem against PCSX2 |
-| Disc latency model with field (20 ms) granularity | `Port/src/sotc/hle/sce_fileio.cpp`, `sce_cdvd.cpp` | real reads block the caller; the game's thread interleaving depends on it | sub-field timed waits in the EE scheduler; calibrate against PCSX2 |
+| Disc latency model with field (20 ms) granularity | `Port/src/sotc/hle/sce_fileio.cpp`, `sce_cdvd.cpp` | real reads block the caller; the game's thread interleaving depends on it | sub-field timed waits in the EE scheduler; calibrate against PCSX2. PCSX2 data (PINE-polled libcdvd requests): the 32 KB NICO.DAT cache reads after the 50 Hz choice complete in 0.02-1 field and the loader issues one per field; natively each completes on a field boundary and the chain takes 3-4 fields per read, which is the whole +47 fields of that loading screen |
 | SCE fio calls without a VFS equivalent return SCE error codes | `Port/src/sotc/hle/sce_fileio.cpp` | no IOP FILEIO server; each call is logged | implement if the game uses them |
 | SIO2 transfer latency: 1,000 + 1,200 IOP cycles per byte; SIF DMA completion 64 cycles + 1 per 4 bytes | `ps2xIOP/src/emulator/devices/iop_sio2.cpp`, `iop_emulator.cpp` | order of magnitude of a 250 kHz pad link | calibrate against PCSX2 if pad latency matters |
 | IOP VBlank runs at NTSC 59.94 Hz while the game is PAL | `ps2xIOP/src/emulator/iop_emulator_const.h` | pre-existing; DS1O_D polls the pad per IOP VBlank | make the IOP VBlank follow the GS video mode like the EE side |
@@ -231,9 +291,10 @@ No game function is stubbed with placeholder return values.
 
 ## Next priorities
 
-1. Emulation speed outside the rasterizer (see blockers): VU1 interpreter on the cloud cutscene (~1.3
-   fields/s), exception-based thread blocking in `EeScheduler` during loading. The disc throughput is still
-   capped by the field rate (drive model completes reads on field boundaries).
+1. Emulated time vs PCSX2 (proposals, need approval because they change guest timing and the goldens):
+   a) syscall cycle cost from the BIOS kernel path lengths (fixes the idle-loop host cost and the
+   pre-cutscene gap being 34 fields shorter than in PCSX2); b) sub-field disc completion (loading after the
+   50 Hz choice is 47 fields longer than in PCSX2). Then VU1 speed for the cutscene itself.
 2. Compare the opening cutscene with a PCSX2 GS dump draw for draw (clouds, hawk, cliffs); re-check the
    menu against PCSX2 now that the solar flare is gone. The faint horizontal stripes on full-screen
    bilinear quads come from the rasterizer's float barycentrics under the EE's round-toward-zero MXCSR

@@ -111,6 +111,119 @@ namespace sotc::watchdog
 
         PS2Runtime *g_runtime = nullptr;
 
+#if defined(_WIN32)
+        struct WriteWatch
+        {
+            uint32_t guest = 0;
+            uint32_t length = 4;
+        };
+        std::vector<WriteWatch> g_writeWatches;
+        uint8_t *g_watchRam = nullptr;
+        std::mutex g_watchMutex;
+        std::map<std::pair<DWORD64, int>, uint64_t> g_watchHits;
+
+        LONG CALLBACK writeWatchHandler(EXCEPTION_POINTERS *info)
+        {
+            if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP)
+            {
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+            CONTEXT *context = info->ContextRecord;
+            const DWORD64 status = context->Dr6 & 0xF;
+            if (!status)
+            {
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+            context->Dr6 = 0;
+            for (int i = 0; i < 4 && i < static_cast<int>(g_writeWatches.size()); ++i)
+            {
+                if (!(status & (1ull << i)))
+                {
+                    continue;
+                }
+                const WriteWatch &watch = g_writeWatches[i];
+                uint64_t hits = 0;
+                {
+                    std::lock_guard<std::mutex> lock(g_watchMutex);
+                    hits = ++g_watchHits[{context->Rip, i}];
+                }
+                if (hits > 3 && (hits & (hits - 1)) != 0)
+                {
+                    continue;
+                }
+                uint32_t value = 0;
+                std::memcpy(&value, g_watchRam + watch.guest, sizeof(value));
+                std::string where;
+                {
+                    std::lock_guard<std::mutex> lock(g_symbolMutex);
+                    if (!g_symbolsReady)
+                    {
+                        SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+                        g_symbolsReady = SymInitialize(GetCurrentProcess(), nullptr, TRUE) == TRUE;
+                    }
+                    where = symbolize(GetCurrentProcess(), context->Rip);
+                }
+                const uint64_t tick = g_runtime ? g_runtime->memory().gs().vsyncTick.load() : 0;
+                SOTC_INFO(Ee, "write watch 0x" << std::hex << watch.guest << " = " << value << std::dec << " hit " << hits << " vsync " << tick
+                                               << " at " << where);
+            }
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        void armWriteWatches()
+        {
+            HANDLE thread = nullptr;
+            while (g_running.load() && !(thread = findThreadByDescription(L"GameThread")))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            if (!thread)
+            {
+                return;
+            }
+            CONTEXT context{};
+            context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+            DWORD64 dr7 = 0;
+            DWORD64 *slots[4] = {&context.Dr0, &context.Dr1, &context.Dr2, &context.Dr3};
+            for (size_t i = 0; i < g_writeWatches.size() && i < 4; ++i)
+            {
+                const WriteWatch &watch = g_writeWatches[i];
+                *slots[i] = reinterpret_cast<DWORD64>(g_watchRam + watch.guest);
+                const DWORD64 len = watch.length == 8 ? 2 : watch.length == 4 ? 3 : watch.length == 2 ? 1 : 0;
+                dr7 |= 1ull << (i * 2);
+                dr7 |= (1ull | (len << 2)) << (16 + i * 4);
+            }
+            context.Dr7 = dr7;
+            SuspendThread(thread);
+            const BOOL ok = SetThreadContext(thread, &context);
+            ResumeThread(thread);
+            CloseHandle(thread);
+            SOTC_INFO(Boot, "write watches armed on GameThread: " << (ok ? "ok" : "failed"));
+        }
+
+        void installWriteWatches(const char *spec)
+        {
+            std::stringstream list{std::string(spec)};
+            std::string item;
+            while (std::getline(list, item, ',') && g_writeWatches.size() < 4)
+            {
+                WriteWatch watch;
+                const size_t colon = item.find(':');
+                watch.guest = static_cast<uint32_t>(std::stoul(item.substr(0, colon), nullptr, 16)) & 0x1FFFFFFu;
+                if (colon != std::string::npos)
+                {
+                    watch.length = static_cast<uint32_t>(std::stoul(item.substr(colon + 1)));
+                }
+                watch.guest &= ~(watch.length - 1u);
+                g_writeWatches.push_back(watch);
+            }
+            g_watchRam = g_runtime->memory().getRDRAM();
+            AddVectoredExceptionHandler(1, writeWatchHandler);
+            g_running.store(true);
+            std::thread(armWriteWatches).detach();
+        }
+#endif
+
         void loop(int intervalSeconds)
         {
             uint64_t lastTick = g_runtime ? g_runtime->memory().gs().vsyncTick.load() : 0;
@@ -414,6 +527,12 @@ namespace sotc::watchdog
     void startFromEnvironment(PS2Runtime *runtime)
     {
         g_runtime = runtime;
+#if defined(_WIN32)
+        if (const char *watches = std::getenv("SOTC_WATCH_WRITE"))
+        {
+            installWriteWatches(watches);
+        }
+#endif
         if (const char *timeline = std::getenv("SOTC_TIMELINE"))
         {
             g_running.store(true);

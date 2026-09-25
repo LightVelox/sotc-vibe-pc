@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-25 (VU1 AOT recompiler, GPU GS renderer, VU1/GIF threads, New Game reachable; eighth session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
+Last updated: 2026-09-25 (hawk fixed: VU0 macro VSQI/VLQD matrix stack; ninth session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 
 ## Working
 
@@ -202,6 +202,16 @@ Last updated: 2026-09-25 (VU1 AOT recompiler, GPU GS renderer, VU1/GIF threads, 
   it now matches the VU1 interpreter (|w|, +x = bit 0, PS2 denormal handling). This changes EE culling of
   objects behind the camera; the cutscene golden was re-recorded (57,499 hashes; the interpreter-only VU1 run
   records the same file).
+* **VU0 macro VU-memory ops**: `VSQI`/`VSQD` stored `vf[it]` at `vi[fs]` (fields swapped) and `VLQI`/`VSQI`/
+  `VLQD`/`VSQD`/`VILWR`/`VISWR` addressed EE RAM (`vi << 4` from address 0) instead of VU0 data memory.
+  KERNEL's matrix stack (`iosPushCurrentMatrix`/`iosPopCurrentMatrix`: `vsqi vf1..vf4, (vi15++)` and
+  `vlqd vf4..vf1, (--vi15)`, current matrix in `vf1`-`vf4`) therefore popped garbage, so every node below
+  a push/pop in a character hierarchy got a broken world matrix: the hawk's bones 2-10 had zero rotation
+  rows and a quaternion in row 3, which the skinning microcode turned into streaks. The ops now use VU0 data
+  memory (`(vi & 0xFF) << 4`, 4 KB) with the hardware field layout, `VILWR`/`VISWR` address qwords per
+  field, and VI0/VF0 are never written (`VIADD`/`VISUB`/`VIADDI`/`VIAND`/`VIOR`, `VILWR`, the
+  post-increment/pre-decrement and loads into VF0). Only the two matrix-stack functions use these ops in
+  this game; all five goldens are unchanged. Found with `SOTC_WATCH_WRITE` on the hawk's node-matrix array.
 * **EE FPU / VU0 macro semantics**: saturation instead of Inf/NaN, EE divide by zero, `sqrt(|x|)`,
   `VRSQRT = fs/sqrt(|ft|)`, `CVT.W.S` saturation; MXCSR round-toward-zero + FTZ/DAZ on the game thread.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
@@ -211,7 +221,10 @@ Last updated: 2026-09-25 (VU1 AOT recompiler, GPU GS renderer, VU1/GIF threads, 
   VSync fields with a `v` suffix, e.g. `290v:cross,375v:cross,770v:down,800v:cross` reaches the SCEE logo
   without a memory card; field-timed steps hold 10 fields by default),
   RAM dumps at a function entry with an optional memory condition
-  (`SOTC_DUMP_RAM_AT=addr:file[:when=addr=value]`), missing guest functions stop the run.
+  (`SOTC_DUMP_RAM_AT=addr:file[:when=addr=value]`), hardware write watchpoints on guest RAM
+  (`SOTC_WATCH_WRITE=addr[:len],...`, up to 4, len 1/2/4/8: debug registers on the GameThread; each writer is
+  logged with the VSync count and the symbolized host function and line, i.e. the generated guest function),
+  missing guest functions stop the run.
 * **GS diagnostics**: `PS2X_GS_TRACE=firstVsync:count:file` writes every draw (`D`, full context
   state + vertices), transfer (`T`), image payload (`I`, hex) and field (`V`, PMODE/DISPFB/DISPLAY) and
   dumps raw VRAM at the start of the window to `file.vram`; `SOTC_DUMP_RAM_AT` also takes `:after=seconds`
@@ -262,20 +275,15 @@ Last updated: 2026-09-25 (VU1 AOT recompiler, GPU GS renderer, VU1/GIF threads, 
 ## Partially working
 
 * Speed after the eighth session (fields/s, default MTVU + GPU renderer, RTX 3060): boot, menus, loading,
-  "No memory card" and logo 50 (paced); cloud cutscene from field 1215 ~37-40 (VU thread ~96% busy,
-  ~25 ms VU work per field); canyon part of the cutscene from ~1790 ~22 (~44 ms VU work per field, ~21% in
-  the exact FMAC path, much of it on the hawk's zero bone matrices); title view (Start at 1250) 50;
+  "No memory card" and logo 50 (paced); cloud cutscene from field 1215 ~40-45 (VU thread ~96% busy,
+  ~25 ms VU work per field); canyon part of the cutscene from ~1790 ~25 (~45-50 ms VU work per field, ~20% in
+  the exact FMAC path: `fmacExact<3>` 12.8% and `fmacExact<2>` 6.2% of the VU thread). The hawk fix did not
+  change the speed: interleaved A/B runs (fields 1340-1780 / 1800-2040) gave 41-45 / 25 fields/s before and
+  40-43 / 25 after; title view (Start at 1250) 50;
   New Game loading and the intro (bridge, shrine, ruins) 50 up to field 3600 at least.
   Pad script for New Game: `...,1250v:start,1450v:start,1550v:cross,1700v:cross`.
-* The hawk in the opening cutscene is drawn as long streaks. The GS, VIF, VU1 clipper and skinning code
-  handle their input correctly; the bone palette the EE uploads (DMA packet built per frame, UNPACK V4-32 x44
-  to VU1 address 0, program image `d18c8dfaae098293`) has proper matrices for bones 0-1 but all-zero rotation
-  rows and row 3 = s * (P, 1) for bones 2-10, while PCSX2's palette at the same moment has proper matrices
-  for all 11 bones. The divergence is in the EE-side character/animation evaluation. A PCSX2 savestate (F1)
-  is a zip with zstd-compressed `eeMemory.bin`, usable for side-by-side RAM comparison (heap addresses differ
-  by small offsets).
 * Title view: the shrine and bridge render, but the "SHADOW OF THE COLOSSUS" logo, the menu entries and the
-  copyright line that PCSX2 shows are missing. The New Game intro sky is purple where PCSX2 is bright white,
+  copyright line that PCSX2 shows are missing (unchanged by the matrix-stack fix). The New Game intro sky is purple where PCSX2 is bright white,
   and a thin magenta column shows at the right edge.
 * Speed after the sixth session (fields/s, native field ranges): boot 0-270 ~51, language/50 Hz menus
   ~43-45, loading 375-731 ~46, "No memory card" + logo ~41-47, black gap before the cutscene 1133-1329
@@ -312,8 +320,7 @@ Last updated: 2026-09-25 (VU1 AOT recompiler, GPU GS renderer, VU1/GIF threads, 
 
 | Area | Blocker | Plan |
 |---|---|---|
-| Emulation speed | The opening cutscene is VU1-bound: ~37-40 fields/s in the clouds, ~22 in the canyon; everything else measured so far (title view, New Game intro) runs at the paced 50 | fix the hawk's bone matrices first (zero matrices push FMACs onto the exact path), then profile the canyon blocks of images `2048debd5c78af0a` and `d18c8dfaae098293` |
-| Hawk / skinned characters | Bones 2-10 of the hawk get zero rotation matrices from the EE | compare the character/motion state with a PCSX2 savestate at the same field and find the first diverging function |
+| Emulation speed | The opening cutscene is VU1-bound: ~40-45 fields/s in the clouds, ~25 in the canyon; everything else measured so far (title view, New Game intro) runs at the paced 50 | find which results send ~20% of the canyon's FMACs to `fmacExact` (images `2048debd5c78af0a` and `d18c8dfaae098293`) and give them a bit-exact fast path (check with `PS2X_VU1_VERIFY=1`) |
 | Audio | `sg2iop_driver` drives SPU2 through LIBSD imports; runtime has no IOP-side SPU2 | SPU2 register model on the IOP side feeding a host mixer |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
@@ -393,7 +400,7 @@ No game function is stubbed with placeholder return values.
 
 ## Next priorities
 
-1. Hawk bone matrices (see "Partially working"), then the missing title logo/menu text and the intro colours;
+1. The missing title logo/menu text and the intro colours;
    then play on from the intro into the first area and fix what blocks or slows it. Capture new VU1 images on
    the way (`PS2X_VU1_CAPTURE`) and regenerate `Port/generated/vu1`.
 2. Compare the opening cutscene with a PCSX2 GS dump draw for draw (clouds, hawk, cliffs); re-check the

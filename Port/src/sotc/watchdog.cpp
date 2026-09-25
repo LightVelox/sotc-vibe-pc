@@ -3,6 +3,7 @@
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -250,34 +251,38 @@ namespace sotc::watchdog
                 g_symbolsReady = SymInitialize(process, nullptr, TRUE) == TRUE;
             }
             const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(durationSeconds);
-            while (std::chrono::steady_clock::now() < end && g_running.load())
+            constexpr size_t kMaxFrames = 48;
+            std::array<DWORD64, kMaxFrames> frames{};
+            stacks.reserve(static_cast<size_t>(durationSeconds) * 2500u);
+            while (std::chrono::steady_clock::now() < end && g_running.load() && stacks.size() < stacks.capacity())
             {
                 if (SuspendThread(thread) == static_cast<DWORD>(-1))
                     break;
                 CONTEXT context{};
                 context.ContextFlags = CONTEXT_FULL;
-                std::vector<DWORD64> pcs;
+                size_t depth = 0;
                 if (GetThreadContext(thread, &context))
                 {
-                    STACKFRAME64 frame{};
-                    frame.AddrPC.Offset = context.Rip;
-                    frame.AddrPC.Mode = AddrModeFlat;
-                    frame.AddrFrame.Offset = context.Rbp;
-                    frame.AddrFrame.Mode = AddrModeFlat;
-                    frame.AddrStack.Offset = context.Rsp;
-                    frame.AddrStack.Mode = AddrModeFlat;
-                    for (int i = 0; i < 48; ++i)
+                    while (depth < kMaxFrames && context.Rip != 0)
                     {
-                        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame, &context, nullptr,
-                                         SymFunctionTableAccess64, SymGetModuleBase64, nullptr) ||
-                            frame.AddrPC.Offset == 0)
-                            break;
-                        pcs.push_back(frame.AddrPC.Offset);
+                        frames[depth++] = context.Rip;
+                        DWORD64 imageBase = 0;
+                        PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(context.Rip, &imageBase, nullptr);
+                        if (!function)
+                        {
+                            context.Rip = *reinterpret_cast<const DWORD64 *>(context.Rsp);
+                            context.Rsp += 8;
+                            continue;
+                        }
+                        PVOID handlerData = nullptr;
+                        DWORD64 establisherFrame = 0;
+                        RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip, function, &context, &handlerData,
+                                         &establisherFrame, nullptr);
                     }
                 }
                 ResumeThread(thread);
-                if (!pcs.empty())
-                    stacks.push_back(std::move(pcs));
+                if (depth != 0)
+                    stacks.emplace_back(frames.begin(), frames.begin() + static_cast<std::ptrdiff_t>(depth));
                 std::this_thread::sleep_for(std::chrono::microseconds(500));
             }
         }

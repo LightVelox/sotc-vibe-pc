@@ -1,5 +1,7 @@
+#include "runtime/ps2_async_vif.h"
 #include "ps2_runtime.h"
 #include "runtime/gs/gs_threaded_backend.h"
+#include "runtime/gs/gs_gpu_backend.h"
 #include "sotc/function_hooks.h"
 #include "sotc/game_disc.h"
 #include "sotc/idle_thread.h"
@@ -110,6 +112,9 @@ int main(int argc, char *argv[])
     std::filesystem::create_directories(paths.mcRoot, error);
 
     GSThreadedBackend::SetEnabledByDefault(true);
+    GSThreadedBackend::SetGpuByDefault(true);
+    GSGpuBackend::SetAsyncPresentDefault(true);
+    ps2x::asyncvif::setDefaultEnabled(true);
 
     try
     {

@@ -46,7 +46,7 @@ if(SOTC_VU1_SOURCES)
     target_link_libraries(sotc PRIVATE sotc_vu1_code)
     target_compile_definitions(sotc PRIVATE SOTC_HAS_VU1_PROGRAMS=1)
     if(MSVC)
-        target_compile_options(sotc_vu1_code PRIVATE /bigobj /fp:precise /W0 /MP $<$<CONFIG:RelWithDebInfo>:/Ob2>)
+        target_compile_options(sotc_vu1_code PRIVATE /bigobj /fp:precise /arch:AVX2 /W0 /MP $<$<CONFIG:RelWithDebInfo>:/Ob2>)
     endif()
 endif()
 

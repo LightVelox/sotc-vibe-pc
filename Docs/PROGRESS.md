@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-24 (idle skip, IOP scheduling, cycle-timed disc, VU1 interpreter; seventh session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
+Last updated: 2026-09-25 (VU1 AOT recompiler, GPU GS renderer, VU1/GIF threads, New Game reachable; eighth session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 
 ## Working
 
@@ -159,28 +159,49 @@ Last updated: 2026-09-24 (idle skip, IOP scheduling, cycle-timed disc, VU1 inter
   so this needed a full rebuild. What remains is spread over the FMAC path (exact-result and flag
   computation, pipeline enqueue): the cutscene needs ~830k VU1 instruction pairs per field, i.e. ~42M pairs/s
   at 50 fields/s, against ~2-3M pairs/s interpreted.
-* **VU1 AOT recompilation: infrastructure (seventh session, approved by the user)**. Bit-exact, plumbing
-  only, no speed gain yet:
+* **VU1 AOT recompilation (eighth session)**, bit-exact against the interpreter:
   * `PS2X_VU1_CAPTURE=dir` writes every distinct 16 KB VU1 code image seen at MSCAL/MSCNT (`vu1_<fnv1a64>.bin`)
-    and the (image, entry PC) pairs (`entries.txt`). Boot to the title view uses 6 images (overlays at the
-    same addresses, ~1,700-1,900 pairs each) and 44 entries. Captures live in `Analysis/oracle/vu1_capture/`.
-  * `ps2xTest/tools/vu1_recomp <capture-dir> Port/generated/vu1` (built in `C:/tmp/bt`) emits one C++ file per
-    image plus `vu1_programs.cpp`. Pairs are decoded with the interpreter's own decoder
-    (`VU1InterpreterAccess::pairInitializer`) into `static constexpr` tables, and the code is split into
-    64-pair blocks behind a pc -> block table. Port CMake builds `Port/generated/vu1/*.cpp` into `sotc_vu1_code`
-    when present and `main.cpp` calls `registerGeneratedVu1Programs()`.
-  * Runtime: the interpreter's instruction bodies and helpers moved into `ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl`
-    (`ps2_vu1_upper.cpp`/`lower.cpp` are gone); the per-pair body of `run()` is
-    `VU1InterpreterAccess::stepPair`. `run()` looks the current image up by hash (recomputed only when the VU1
-    code generation changes) and runs compiled blocks until the program ends, the budget runs out or a pc has
-    no compiled block (then one pair is interpreted). `PS2X_VU1_RECOMP=0` disables it.
-  * Verified: compiled blocks run ~87% of VU1 time in the cutscene and all golden windows stay identical.
-  * Lesson: partial evaluation by force-inlining the interpreter into each of ~11k pairs does not scale
-    (MSVC used 4-7 GB and >20 min per file). The generated step currently calls an out-of-line `stepPair`.
-    Next: the generator emits, per pair, only the code for that pair's upper/lower operation with registers,
-    dest masks and latencies as constants (starting with the ops in the hot blocks 9 and 12 of image
-    `2048debd5c78af0a`), reusing the interpreter's arithmetic helpers so results stay identical; then
-    resolve the pipeline timing statically per block.
+    and the (image, entry PC) pairs (`entries.txt`). `Analysis/oracle/vu1_capture/` now holds 8 images and 66
+    entries (boot, cloud/canyon cutscene, title view, New Game intro up to field ~3700). New images or entries
+    run interpreted until they are captured and the code is regenerated.
+  * `ps2xTest/tools/vu1_recomp <capture-dir> Port/generated/vu1` (built in `C:/tmp/bt`, output git-ignored)
+    emits per-op C++ per image: loop-aware blocks of up to 128 pairs, gotos for in-block branches, delay-slot and
+    E-bit copies. Registers are written immediately with exact per-lane ready times; MAC/status/clip flags go
+    through lazy FIFO rings and are folded on read; XGKICK progress is caught up lazily. FMAC ops take a fast
+    path when every destination lane is safely normal (no clamping, no flag other than sign, no cancellation)
+    and fall back to the exact double-precision path otherwise. Straight-line segments get a statically
+    scheduled copy (entry checks for operand readiness, cycle snapshots instead of per-pair checks).
+    `sotc_vu1_code` is built with `/arch:AVX2`.
+  * `PS2X_VU1_VERIFY=1` runs every VU1 program twice (compiled, then the interpreter on a copy) and compares
+    registers, pipeline state, VU memory and XGKICK packets (0 mismatches over 4.9M runs up to field 1785);
+    `PS2X_VU1_RECOMP=0` disables the compiled code.
+* **GPU GS renderer (eighth session, default)**: `GSGpuBackend` (OpenGL 4.6 compute on the GS worker thread,
+  own WGL context and loader) keeps the 4 MB of GS memory in an SSBO with the swizzle tables and ports the
+  reference rasterizer to GLSL. Primitives are binned into 16x16 tiles, one workgroup per tile draws them in
+  order; batches flush on render-target changes, texture/CLUT page hazards and transfers. CLUT loads of a batch
+  run in one dispatch (the CPU resolves which load last wrote each 16-entry block) and repeated identical
+  loads are skipped; uploads go through a persistent-mapped 64 MB ring and presents read back asynchronously.
+  Against the CPU rasterizer: max per-channel difference 3 in the cutscene, identical loading screen,
+  logo/menu differ by the CPU path's round-toward-zero stripes. `PS2X_GS_GPU=0/1` overrides the default,
+  `PS2X_GS_GPU_STATS=1` prints presents/s, GPU time and batches/CLUT loads/transfers per frame;
+  `gs_replay --backend gpu|gputhread` and `--compare-backends A B [--dump dir]` replay recordings on it.
+* **VU1 and GIF on their own threads (MTVU, eighth session, default)**: `ps2x::asyncvif` runs VIF1 and GIF PATH3
+  jobs in order on a "VUThread" and GIF packets on a "GIFThread" (chunks of 256 KB). The EE waits for both
+  only when it touches VIF1/GIF registers, VU1 memory or GS privileged registers. DMA completion stays
+  immediate, so interrupt timing is no longer deterministic when this is on. `PS2X_MTVU=0` restores the
+  deterministic serial path (goldens and `Tools/golden_run.py` use it); `PS2X_MTVU_STATS=1` prints fields/s,
+  VU thread busy % and VU ms per field.
+* **Guest call unwinding fix (eighth session)**: when a scheduler checkpoint unwinds generated code,
+  `ctx->pc` holds the entry of the deepest pending call. `dispatchGuestBranch` treated `ctx->pc == callee
+  entry` as "the callee returned without setting pc", so in recursive code (collision BVH walk
+  `sub_01223E70` <-> `sub_01229658` <-> `sub_01223FE8`) an outer level resumed after its `jal` with the inner
+  frames' `$sp`. The scheduler now flags an unwind in progress (`EeScheduler::unwinding()`), cleared before
+  it re-dispatches. This crashed New Game at field 1739 (JALR to 0x80000000 in
+  `ClipCollisionDirectCallBackObjAry`).
+* **VCLIP (VU0 macro) semantics**: the recompiler judged against the signed `w` and swapped the +/- flag bits;
+  it now matches the VU1 interpreter (|w|, +x = bit 0, PS2 denormal handling). This changes EE culling of
+  objects behind the camera; the cutscene golden was re-recorded (57,499 hashes; the interpreter-only VU1 run
+  records the same file).
 * **EE FPU / VU0 macro semantics**: saturation instead of Inf/NaN, EE divide by zero, `sqrt(|x|)`,
   `VRSQRT = fs/sqrt(|ft|)`, `CVT.W.S` saturation; MXCSR round-toward-zero + FTZ/DAZ on the game thread.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
@@ -219,7 +240,8 @@ Last updated: 2026-09-24 (idle skip, IOP scheduling, cycle-timed disc, VU1 inter
   EE cycle.
 * **Boot timing tools**: `Tools/measure_boot.py native|pcsx2 <dir>` runs the game or PCSX2 with the pad
   script, captures the window (PrintWindow, works when occluded) and, for PCSX2, drives the pad over
-  PostMessage at the same guest VBlank counts and polls over PINE the game's VBlank counter
+  PostMessage at the same guest VBlank counts (cross, circle, triangle, square, start and the D-pad map to PCSX2's
+  keyboard bindings) and polls over PINE the game's VBlank counter
   (`0x1DC9D8`, native field - 35) and libcdvd's pending read (`0x130A80` lsn/sectors, busy flag
   `0x1309B4`). `Tools/boot_milestones.py <dir> native|pcsx2` classifies frames into milestones,
   `Tools/boot_phases.py <dir> f0,f1,...` prints fields/s between native fields,
@@ -239,6 +261,22 @@ Last updated: 2026-09-24 (idle skip, IOP scheduling, cycle-timed disc, VU1 inter
 
 ## Partially working
 
+* Speed after the eighth session (fields/s, default MTVU + GPU renderer, RTX 3060): boot, menus, loading,
+  "No memory card" and logo 50 (paced); cloud cutscene from field 1215 ~37-40 (VU thread ~96% busy,
+  ~25 ms VU work per field); canyon part of the cutscene from ~1790 ~22 (~44 ms VU work per field, ~21% in
+  the exact FMAC path, much of it on the hawk's zero bone matrices); title view (Start at 1250) 50;
+  New Game loading and the intro (bridge, shrine, ruins) 50 up to field 3600 at least.
+  Pad script for New Game: `...,1250v:start,1450v:start,1550v:cross,1700v:cross`.
+* The hawk in the opening cutscene is drawn as long streaks. The GS, VIF, VU1 clipper and skinning code
+  handle their input correctly; the bone palette the EE uploads (DMA packet built per frame, UNPACK V4-32 x44
+  to VU1 address 0, program image `d18c8dfaae098293`) has proper matrices for bones 0-1 but all-zero rotation
+  rows and row 3 = s * (P, 1) for bones 2-10, while PCSX2's palette at the same moment has proper matrices
+  for all 11 bones. The divergence is in the EE-side character/animation evaluation. A PCSX2 savestate (F1)
+  is a zip with zstd-compressed `eeMemory.bin`, usable for side-by-side RAM comparison (heap addresses differ
+  by small offsets).
+* Title view: the shrine and bridge render, but the "SHADOW OF THE COLOSSUS" logo, the menu entries and the
+  copyright line that PCSX2 shows are missing. The New Game intro sky is purple where PCSX2 is bright white,
+  and a thin magenta column shows at the right edge.
 * Speed after the sixth session (fields/s, native field ranges): boot 0-270 ~51, language/50 Hz menus
   ~43-45, loading 375-731 ~46, "No memory card" + logo ~41-47, black gap before the cutscene 1133-1329
   ~27, cloud cutscene still ~1.3 (VU1). Milestones (wall s / game VBlank count, PCSX2 in brackets):
@@ -274,7 +312,8 @@ Last updated: 2026-09-24 (idle skip, IOP scheduling, cycle-timed disc, VU1 inter
 
 | Area | Blocker | Plan |
 |---|---|---|
-| Emulation speed | Everything after the SCEE logo is VU1-bound: cloud intro and the title view (shrine and bridge, reached with Start at field 1250) run at ~3.1-3.3 fields/s; everything before runs at the paced 50 fields/s | VU1 AOT recompilation (approved; infrastructure in place, per-op code generation next) |
+| Emulation speed | The opening cutscene is VU1-bound: ~37-40 fields/s in the clouds, ~22 in the canyon; everything else measured so far (title view, New Game intro) runs at the paced 50 | fix the hawk's bone matrices first (zero matrices push FMACs onto the exact path), then profile the canyon blocks of images `2048debd5c78af0a` and `d18c8dfaae098293` |
+| Hawk / skinned characters | Bones 2-10 of the hawk get zero rotation matrices from the EE | compare the character/motion state with a PCSX2 savestate at the same field and find the first diverging function |
 | Audio | `sg2iop_driver` drives SPU2 through LIBSD imports; runtime has no IOP-side SPU2 | SPU2 register model on the IOP side feeding a host mixer |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
@@ -354,8 +393,9 @@ No game function is stubbed with placeholder return values.
 
 ## Next priorities
 
-1. VU1 speed: per-op code generation in `vu1_recomp`, then static pipeline timing per block; then play past
-   the title view (New Game, first area) and fix what blocks or slows it.
+1. Hawk bone matrices (see "Partially working"), then the missing title logo/menu text and the intro colours;
+   then play on from the intro into the first area and fix what blocks or slows it. Capture new VU1 images on
+   the way (`PS2X_VU1_CAPTURE`) and regenerate `Port/generated/vu1`.
 2. Compare the opening cutscene with a PCSX2 GS dump draw for draw (clouds, hawk, cliffs); re-check the
    menu against PCSX2 now that the solar flare is gone. The faint horizontal stripes on full-screen
    bilinear quads come from the rasterizer's float barycentrics under the EE's round-toward-zero MXCSR

@@ -54,7 +54,7 @@ def sync_tree(src, dst):
         open(b, "wb").write(new)
         changed += 1
     for name in os.listdir(dst):
-        if name not in wanted:
+        if name not in wanted and os.path.isfile(os.path.join(dst, name)):
             os.remove(os.path.join(dst, name))
             removed += 1
     print(f"generated sources: {len(wanted)} total, {changed} written, {removed} removed")

@@ -14,6 +14,7 @@ set(SOTC_HOST_SOURCES
     src/sotc/game_disc.cpp
     src/sotc/hle/sce_cdvd.cpp
     src/sotc/hle/sce_fileio.cpp
+    src/sotc/idle_thread.cpp
     src/sotc/log.cpp
     src/sotc/module_guard.cpp
     src/sotc/sha256.cpp
@@ -36,6 +37,18 @@ target_precompile_headers(sotc_game_code PRIVATE
 add_executable(sotc ${SOTC_HOST_SOURCES})
 target_include_directories(sotc PRIVATE src "${SOTC_GENERATED_DIR}")
 target_link_libraries(sotc PRIVATE sotc_game_code ps2_runtime)
+
+file(GLOB SOTC_VU1_SOURCES CONFIGURE_DEPENDS "${SOTC_GENERATED_DIR}/vu1/*.cpp")
+if(SOTC_VU1_SOURCES)
+    add_library(sotc_vu1_code STATIC ${SOTC_VU1_SOURCES})
+    target_include_directories(sotc_vu1_code PRIVATE "${CMAKE_SOURCE_DIR}/External/PS2Recomp/ps2xRuntime/src/lib/vu")
+    target_link_libraries(sotc_vu1_code PUBLIC ps2_runtime)
+    target_link_libraries(sotc PRIVATE sotc_vu1_code)
+    target_compile_definitions(sotc PRIVATE SOTC_HAS_VU1_PROGRAMS=1)
+    if(MSVC)
+        target_compile_options(sotc_vu1_code PRIVATE /bigobj /fp:precise /W0 /MP $<$<CONFIG:RelWithDebInfo>:/Ob2>)
+    endif()
+endif()
 
 if(MSVC)
     target_compile_options(sotc_game_code PRIVATE /bigobj /fp:precise /W0 /MP $<$<CONFIG:RelWithDebInfo>:/Ob2>)

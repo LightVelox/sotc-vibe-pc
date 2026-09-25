@@ -2,12 +2,17 @@
 #include "runtime/gs/gs_threaded_backend.h"
 #include "sotc/function_hooks.h"
 #include "sotc/game_disc.h"
+#include "sotc/idle_thread.h"
 #include "sotc/log.h"
 #include "sotc/module_guard.h"
 #include "sotc/watchdog.h"
 #include "sotc/hle/sce_fileio.h"
 #include "sotc/hle/sce_cdvd.h"
 #include "sotc_layout_generated.h"
+
+#if SOTC_HAS_VU1_PROGRAMS
+void registerGeneratedVu1Programs();
+#endif
 
 #include <cstdlib>
 #include <exception>
@@ -131,6 +136,10 @@ int main(int argc, char *argv[])
         sotc::installModuleGuards(runtime);
         sotc::hle::installSceFileIo(runtime);
         sotc::hle::installSceCdvd(runtime);
+        sotc::installIdleThreadSkip(runtime);
+#if SOTC_HAS_VU1_PROGRAMS
+        registerGeneratedVu1Programs();
+#endif
         sotc::installCallTracesFromEnvironment(runtime);
         sotc::FunctionHooks::instance().logBindings();
 

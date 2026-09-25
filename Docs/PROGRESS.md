@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-24 (boot-to-cutscene timing vs PCSX2, sixth session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
+Last updated: 2026-09-24 (idle skip, IOP scheduling, cycle-timed disc, VU1 interpreter; seventh session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 
 ## Working
 
@@ -119,6 +119,68 @@ Last updated: 2026-09-24 (boot-to-cutscene timing vs PCSX2, sixth session). Targ
   * **Pad script is deterministic**: scripted buttons are evaluated when the game reads the pad, from the
     current field. They used to be sampled by the host render loop, so presses depended on host timing and
     were lost when the window was occluded.
+* **Idle thread, IOP scheduling and disc timing (2026-09-24, seventh session)**: every phase before the
+  cutscene now runs at the paced 50 fields/s; the first cutscene frame comes at ~27 s of wall time (field
+  1215; was ~33 s / field 1329; PCSX2 ~29.5 s). The goldens were re-recorded twice for the timeline changes
+  below (the old set is not kept in the repo).
+  * **Idle thread skip**: the game's lowest-priority thread (`sub_001A8068`) polls
+    `iosRecvMsg(0x1F7A70, 0, 0)` forever. `iosRecvMsg` is replaced by a wrapper (`Port/src/sotc/idle_thread.cpp`)
+    that, only for the call from the idle loop (`$ra == 0x1A808C`), calls `EeScheduler::skipIdleCycles()`:
+    when no thread at the same or higher priority is ready, no interrupt/invocation is pending and no
+    reschedule is requested, EE time advances in 1,024-cycle steps (the IOP runs as before, EE timer
+    interrupts are hit exactly) until the next scheduler deadline or until something becomes pending. One
+    idle iteration then runs normally. It used to take ~51,600 iterations per field (60-70% of the game
+    thread in the menus/logo). `SOTC_IDLE_SKIP=0` turns it off.
+  * **IOP threads preempt like the real IOP kernel**: `SignalSema`, `SetEventFlag`, `StartThread`,
+    `WakeupThread` and `ResumeThread` (thread-context variants) yield when they make a higher-priority IOP
+    thread ready. Before, the woken thread only ran at the next 128-cycle IOP batch boundary, so SIO2MAN's
+    request/acknowledge event-flag protocol depended on where batch boundaries fell; the idle skip moved
+    them and the pad thread deadlocked (the pad stopped updating at tick 43).
+  * **IRX `module_start` runs in a real IOP thread** (`kModuleStartPriority` 8, 16 KB stack) and the IOP
+    scheduler runs until it returns (at most 2 s of IOP time). It used to be a plain call outside any
+    thread, where `WaitEventFlag`/`WaitSema` fail: DS1O_D's start-up SIO2 transfers left stale bits (0x401) in
+    SIO2MAN's event flag and only worked by accident of scheduling. Test: `ps2_iop_emulator_tests` (a
+    `module_start` that blocks on a flag set by its own threads, and a low-priority setter that must hand
+    over to the higher-priority waiter immediately).
+  * **Disc reads complete at their EE cycle**: `sceCdRead`/`sceCdReadIOPm` compute the completion cycle
+    (`SOTC_DVD_RATE` bytes/s, `SOTC_DVD_SEEK_MS` for non-sequential reads, default 20 ms) and `sceCdSync(0)`
+    blocks until exactly that cycle with the new `EeScheduler::waitUntilCycle` (an `ExternalWake` deadline
+    without host pacing; `currentCycle()` is public). It used to round up to the next field (3-4 fields
+    per 32 KB NICO.DAT read). "No memory card" now appears at field 662 (was 739; PCSX2 684) and the logo is
+    shorter because the cutscene data finishes loading sooner. fio `sceOpen`/`sceGetstat`/`sceRead` and
+    `sceCdSearchFile` stay field-based: they only run during boot, where the module load addresses depend
+    on the thread interleaving.
+* **VU1 interpreter 2x faster, bit-exact (seventh session)**: pipeline commits only look at occupied slots
+  (valid-slot bitmasks per pipeline) and return immediately before the next ready cycle (lower bound kept by
+  every enqueue); `advanceTo`/`flushPipelines` jump over cycles where nothing commits and PATH1 is idle;
+  decoded pairs are used by reference; VI read/write scans use bit scans; XGKICK no longer zeroes its 64 KB
+  packet buffer per kick. The cloud cutscene went from ~1.6 to ~3.1 fields/s and all five golden windows
+  (57,407 per-command VRAM hashes in the cutscene) are identical. `ps2_vu1.h` is in the generated code's PCH,
+  so this needed a full rebuild. What remains is spread over the FMAC path (exact-result and flag
+  computation, pipeline enqueue): the cutscene needs ~830k VU1 instruction pairs per field, i.e. ~42M pairs/s
+  at 50 fields/s, against ~2-3M pairs/s interpreted.
+* **VU1 AOT recompilation: infrastructure (seventh session, approved by the user)**. Bit-exact, plumbing
+  only, no speed gain yet:
+  * `PS2X_VU1_CAPTURE=dir` writes every distinct 16 KB VU1 code image seen at MSCAL/MSCNT (`vu1_<fnv1a64>.bin`)
+    and the (image, entry PC) pairs (`entries.txt`). Boot to the title view uses 6 images (overlays at the
+    same addresses, ~1,700-1,900 pairs each) and 44 entries. Captures live in `Analysis/oracle/vu1_capture/`.
+  * `ps2xTest/tools/vu1_recomp <capture-dir> Port/generated/vu1` (built in `C:/tmp/bt`) emits one C++ file per
+    image plus `vu1_programs.cpp`. Pairs are decoded with the interpreter's own decoder
+    (`VU1InterpreterAccess::pairInitializer`) into `static constexpr` tables, and the code is split into
+    64-pair blocks behind a pc -> block table. Port CMake builds `Port/generated/vu1/*.cpp` into `sotc_vu1_code`
+    when present and `main.cpp` calls `registerGeneratedVu1Programs()`.
+  * Runtime: the interpreter's instruction bodies and helpers moved into `ps2xRuntime/src/lib/vu/ps2_vu1_impl.inl`
+    (`ps2_vu1_upper.cpp`/`lower.cpp` are gone); the per-pair body of `run()` is
+    `VU1InterpreterAccess::stepPair`. `run()` looks the current image up by hash (recomputed only when the VU1
+    code generation changes) and runs compiled blocks until the program ends, the budget runs out or a pc has
+    no compiled block (then one pair is interpreted). `PS2X_VU1_RECOMP=0` disables it.
+  * Verified: compiled blocks run ~87% of VU1 time in the cutscene and all golden windows stay identical.
+  * Lesson: partial evaluation by force-inlining the interpreter into each of ~11k pairs does not scale
+    (MSVC used 4-7 GB and >20 min per file). The generated step currently calls an out-of-line `stepPair`.
+    Next: the generator emits, per pair, only the code for that pair's upper/lower operation with registers,
+    dest masks and latencies as constants (starting with the ops in the hot blocks 9 and 12 of image
+    `2048debd5c78af0a`), reusing the interpreter's arithmetic helpers so results stay identical; then
+    resolve the pipeline timing statically per block.
 * **EE FPU / VU0 macro semantics**: saturation instead of Inf/NaN, EE divide by zero, `sqrt(|x|)`,
   `VRSQRT = fs/sqrt(|ft|)`, `CVT.W.S` saturation; MXCSR round-toward-zero + FTZ/DAZ on the game thread.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
@@ -212,12 +274,12 @@ Last updated: 2026-09-24 (boot-to-cutscene timing vs PCSX2, sixth session). Targ
 
 | Area | Blocker | Plan |
 |---|---|---|
-| Emulation speed | Cutscene: `VU1Interpreter::run` is ~88% of the game thread; menus/logo/pre-cutscene: the idle thread's syscall poll loop (60-70%), see Partially working | VU1: interpreter hot spots or microcode recompilation (ask first); idle loop: charge syscalls their kernel cycle cost (timing change, proposal below) or make each iteration cheaper |
+| Emulation speed | Everything after the SCEE logo is VU1-bound: cloud intro and the title view (shrine and bridge, reached with Start at field 1250) run at ~3.1-3.3 fields/s; everything before runs at the paced 50 fields/s | VU1 AOT recompilation (approved; infrastructure in place, per-op code generation next) |
 | Audio | `sg2iop_driver` drives SPU2 through LIBSD imports; runtime has no IOP-side SPU2 | SPU2 register model on the IOP side feeding a host mixer |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
 | FMV | FFmpeg disabled | decide decoder strategy |
-| EE cycle accounting | 8 EE cycles per recompiled-function dispatch, 32 per loop back-edge, 0 per syscall; the PS2 kernel spends ~45-250 instructions per syscall | calibrate against the BIOS kernel path lengths / PCSX2 (changes emulated timing, needs approval and new goldens) |
+| EE cycle accounting | 8 EE cycles per recompiled-function dispatch, 32 per loop back-edge, 0 per syscall; the PS2 kernel spends ~45-250 instructions per syscall | no longer a speed problem (the idle thread is skipped); charge syscall costs only if a timing difference shows up |
 
 ## Temporary hacks / modelled behaviour
 
@@ -225,7 +287,8 @@ Last updated: 2026-09-24 (boot-to-cutscene timing vs PCSX2, sixth session). Targ
 |---|---|---|---|
 | FFmpeg disabled (MPEG → stub frames) | root `CMakeLists.txt` | avoid third-party prebuilt downloads during bring-up | FMV strategy decided |
 | HLE bindings for SIF/file/CD/DECI2/TTY/MPEG/IPU | `Port/recomp/sotc.toml`, `Port/src/sotc/hle/` | runtime IOP bridge is API-level | revisit per subsystem against PCSX2 |
-| Disc latency model with field (20 ms) granularity | `Port/src/sotc/hle/sce_fileio.cpp`, `sce_cdvd.cpp` | real reads block the caller; the game's thread interleaving depends on it | sub-field timed waits in the EE scheduler; calibrate against PCSX2. PCSX2 data (PINE-polled libcdvd requests): the 32 KB NICO.DAT cache reads after the 50 Hz choice complete in 0.02-1 field and the loader issues one per field; natively each completes on a field boundary and the chain takes 3-4 fields per read, which is the whole +47 fields of that loading screen |
+| Disc latency model: `sceCdRead` at EE-cycle granularity (3.5 MB/s, 20 ms seek), fio open/getstat/read and `sceCdSearchFile` in whole fields | `Port/src/sotc/hle/sce_fileio.cpp`, `sce_cdvd.cpp` | real reads block the caller; the game's thread interleaving depends on it (boot module addresses) | calibrate against PCSX2 if loading times matter; loading is now shorter than in PCSX2 |
+| Idle thread skip | `Port/src/sotc/idle_thread.cpp`, `EeScheduler::skipIdleCycles` | the idle thread's `iosRecvMsg` poll cost 60-70% of host time | — (skips only when nothing else can run) |
 | SCE fio calls without a VFS equivalent return SCE error codes | `Port/src/sotc/hle/sce_fileio.cpp` | no IOP FILEIO server; each call is logged | implement if the game uses them |
 | SIO2 transfer latency: 1,000 + 1,200 IOP cycles per byte; SIF DMA completion 64 cycles + 1 per 4 bytes | `ps2xIOP/src/emulator/devices/iop_sio2.cpp`, `iop_emulator.cpp` | order of magnitude of a 250 kHz pad link | calibrate against PCSX2 if pad latency matters |
 | IOP VBlank runs at NTSC 59.94 Hz while the game is PAL | `ps2xIOP/src/emulator/iop_emulator_const.h` | pre-existing; DS1O_D polls the pad per IOP VBlank | make the IOP VBlank follow the GS video mode like the EE side |
@@ -291,10 +354,8 @@ No game function is stubbed with placeholder return values.
 
 ## Next priorities
 
-1. Emulated time vs PCSX2 (proposals, need approval because they change guest timing and the goldens):
-   a) syscall cycle cost from the BIOS kernel path lengths (fixes the idle-loop host cost and the
-   pre-cutscene gap being 34 fields shorter than in PCSX2); b) sub-field disc completion (loading after the
-   50 Hz choice is 47 fields longer than in PCSX2). Then VU1 speed for the cutscene itself.
+1. VU1 speed: per-op code generation in `vu1_recomp`, then static pipeline timing per block; then play past
+   the title view (New Game, first area) and fix what blocks or slows it.
 2. Compare the opening cutscene with a PCSX2 GS dump draw for draw (clouds, hawk, cliffs); re-check the
    menu against PCSX2 now that the solar flare is gone. The faint horizontal stripes on full-screen
    bilinear quads come from the rasterizer's float barycentrics under the EE's round-toward-zero MXCSR

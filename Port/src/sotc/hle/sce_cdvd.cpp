@@ -12,13 +12,12 @@ namespace sotc::hle
 {
     namespace
     {
-        constexpr double kFieldsPerSecond = 50.0;
         constexpr uint32_t kSectorSize = 2048;
 
         struct DriveModel
         {
             std::mutex mutex;
-            double busyUntilField = 0.0;
+            uint64_t busyUntilCycle = 0;
             bool pending = false;
             uint32_t nextSequentialLsn = 0xFFFFFFFFu;
             uint64_t reads = 0;
@@ -38,10 +37,15 @@ namespace sotc::hle
             return rate;
         }
 
-        double seekFields()
+        uint64_t secondsToCycles(double seconds)
         {
-            static const double fields = envDouble("SOTC_DVD_SEEK_FIELDS", 1.0);
-            return fields;
+            return static_cast<uint64_t>(std::llround(seconds * static_cast<double>(EeScheduler::kEeClockHz)));
+        }
+
+        uint64_t seekCycles()
+        {
+            static const uint64_t cycles = secondsToCycles(envDouble("SOTC_DVD_SEEK_MS", 20.0) / 1000.0);
+            return cycles;
         }
 
         void returnTo(R5900Context *ctx)
@@ -62,20 +66,19 @@ namespace sotc::hle
             {
                 return;
             }
-            const double now = static_cast<double>(runtime->eeScheduler().currentVSyncTick());
+            const uint64_t now = runtime->eeScheduler().currentCycle();
             std::lock_guard<std::mutex> lock(g_drive.mutex);
-            double start = std::max(now, g_drive.busyUntilField);
+            uint64_t start = std::max(now, g_drive.busyUntilCycle);
             if (lsn != g_drive.nextSequentialLsn)
             {
-                start += seekFields();
+                start += seekCycles();
             }
-            const double transfer = static_cast<double>(sectors) * kSectorSize / bytesPerSecond() * kFieldsPerSecond;
-            g_drive.busyUntilField = start + transfer;
+            g_drive.busyUntilCycle = start + secondsToCycles(static_cast<double>(sectors) * kSectorSize / bytesPerSecond());
             g_drive.pending = true;
             g_drive.nextSequentialLsn = lsn + sectors;
             ++g_drive.reads;
-            SOTC_TRACE(File, "sceCdRead(lsn=0x" << std::hex << lsn << ", sectors=0x" << sectors << ", buf=0x" << buffer << std::dec << ") completes at field "
-                                                << g_drive.busyUntilField << " (now " << now << ")");
+            SOTC_TRACE(File, "sceCdRead(lsn=0x" << std::hex << lsn << ", sectors=0x" << sectors << ", buf=0x" << buffer << std::dec << ") completes at cycle "
+                                                << g_drive.busyUntilCycle << " (now " << now << ")");
         }
 
         template <auto Original>
@@ -86,7 +89,7 @@ namespace sotc::hle
             const uint32_t mode = getRegU32(ctx, 4);
             Original(rdram, ctx, runtime);
             EeScheduler &scheduler = runtime->eeScheduler();
-            const uint64_t now = scheduler.currentVSyncTick();
+            const uint64_t now = scheduler.currentCycle();
             uint64_t target = 0;
             {
                 std::lock_guard<std::mutex> lock(g_drive.mutex);
@@ -95,10 +98,9 @@ namespace sotc::hle
                     setReturnS32(ctx, 0);
                     return;
                 }
-                const uint64_t done = static_cast<uint64_t>(std::ceil(g_drive.busyUntilField));
-                if (mode != 0)
+                const bool busy = g_drive.busyUntilCycle > now;
+                if (mode != 0 || !busy)
                 {
-                    const bool busy = done > now;
                     if (!busy)
                     {
                         g_drive.pending = false;
@@ -107,10 +109,10 @@ namespace sotc::hle
                     return;
                 }
                 g_drive.pending = false;
-                target = std::max<uint64_t>(done, now + 1);
+                target = g_drive.busyUntilCycle;
             }
-            scheduler.waitVSync(target - 1, 0, [resumePc](R5900Context &context)
-                                { context.pc = resumePc; });
+            scheduler.waitUntilCycle(target, 0, [resumePc](R5900Context &context)
+                                     { context.pc = resumePc; });
         }
 
         struct Binding
@@ -123,11 +125,11 @@ namespace sotc::hle
 
         const Binding kBindings[] = {
             {0x001DB688, "sceCdRead", &sceCdReadTimed<ps2_stubs::sceCdRead>,
-             "runtime ISO read; drive busy for modelled seek + transfer time (SOTC_DVD_RATE, SOTC_DVD_SEEK_FIELDS)"},
+             "runtime ISO read; drive busy for modelled seek + transfer time in EE cycles (SOTC_DVD_RATE, SOTC_DVD_SEEK_MS)"},
             {0x001DB868, "sceCdReadIOPm", &sceCdReadTimed<ps2_stubs::sceCdReadIOPm>,
              "runtime ISO read into IOP RAM; same drive model as sceCdRead"},
             {0x00117098, "sceCdSync", &sceCdSyncTimed<ps2_stubs::sceCdSync>,
-             "mode 0 blocks the caller until the modelled read completes (>= 1 field); mode 1 polls"},
+             "mode 0 blocks the caller until the EE cycle the modelled read completes at; mode 1 polls"},
             {0x00117138, "sceCdSyncS", &sceCdSyncTimed<ps2_stubs::sceCdSyncS>,
              "same drive model as sceCdSync"},
         };

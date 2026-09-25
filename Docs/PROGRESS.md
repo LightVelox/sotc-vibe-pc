@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-25 (hawk fixed: VU0 macro VSQI/VLQD matrix stack; ninth session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
+Last updated: 2026-09-25 (DMA chains past 4096 tags, VU0 random/FTOI/ABS, VU0 macro audit; ninth session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 
 ## Working
 
@@ -202,6 +202,29 @@ Last updated: 2026-09-25 (hawk fixed: VU0 macro VSQI/VLQD matrix stack; ninth se
   it now matches the VU1 interpreter (|w|, +x = bit 0, PS2 denormal handling). This changes EE culling of
   objects behind the camera; the cutscene golden was re-recorded (57,499 hashes; the interpreter-only VU1 run
   records the same file).
+* **DMA chains longer than 4096 tags**: the runtime's chain walker stopped after 4096 tags and silently dropped
+  the rest. The canyon shots of the opening cutscene (from field ~2520) build VIF1 chains of 4,190-4,600 tags;
+  the dropped tail held the letterbox bars and the font re-upload (IMAGE GIFtag in one DIRECT, 8 KB of pixels
+  in the next), so the GIF stayed in IMAGE mode and swallowed the next frame's first 8 KB of A+D packets,
+  including `FRAME_1 = 0xE8`: the whole scene went to FBP 0 and the screen showed dark-blue silhouettes and
+  no letterbox. The cap is now 2^20 tags with a log line if it is ever reached.
+* **VU0 macro audit and fixes**: `Tools/vu0_corpus.py <out.inc>` extracts every distinct COP2 operation the
+  game uses together with its generated C++ (752 encodings); configuring ps2xTest with
+  `-DPS2X_VU0_AUDIT_CORPUS=<out.inc>` builds `vu0_audit`, which runs each one on random inputs against the VU1
+  interpreter (upper ops as micro upper words, lower ops as micro lower words) and reports vf/ACC/Q/clip/VI/R
+  differences. Found and fixed: `VRNEXT` never wrote its destination and `VRINIT`/`VRXOR` used an invented
+  generator (now the PS2 LFSR on bits 4/22, R in [1,2), broadcast to all lanes; `CTC2 R` keeps the mantissa),
+  so `iosGetRandom` (68 callers: particles, water, AI, camera shuffle) returned stale register contents;
+  `VFTOI` returned 0x80000000 on positive overflow (now 0x7FFFFFFF); `VABS` kept denormals. Remaining
+  differences are 1-4 ulp rounding in multiply-adds (host SSE under round-toward-zero, as in PCSX2), overflow
+  near FLT_MAX, exponent-255 inputs, and `VRSQRT` by -0 returning -MAX (PCSX2 does the same).
+* **VU0 R register shared across threads**: guest threads and handlers each have their own VU0 registers;
+  the R register now follows the scheduler's shared copy (`EeScheduler::loadSharedVu0Random`), because
+  thread contexts start with R = 0, where the LFSR never advances. Sharing the whole VU0 file was tried and
+  rejected: our scheduler switches threads between function dispatches, where the PS2 would not, and leaked
+  vector registers produced a haze over the clouds. With the working generator the cloud shot draws 264-270
+  mist particles per frame, as PCSX2 does (261-268; 233-240 before). The cutscene golden was re-recorded for
+  this intended change (58,833 command hashes); the other four goldens are unchanged.
 * **VU0 macro VU-memory ops**: `VSQI`/`VSQD` stored `vf[it]` at `vi[fs]` (fields swapped) and `VLQI`/`VSQI`/
   `VLQD`/`VSQD`/`VILWR`/`VISWR` addressed EE RAM (`vi << 4` from address 0) instead of VU0 data memory.
   KERNEL's matrix stack (`iosPushCurrentMatrix`/`iosPopCurrentMatrix`: `vsqi vf1..vf4, (vi15++)` and
@@ -275,13 +298,19 @@ Last updated: 2026-09-25 (hawk fixed: VU0 macro VSQI/VLQD matrix stack; ninth se
 ## Partially working
 
 * Speed after the eighth session (fields/s, default MTVU + GPU renderer, RTX 3060): boot, menus, loading,
-  "No memory card" and logo 50 (paced); cloud cutscene from field 1215 ~40-45 (VU thread ~96% busy,
-  ~25 ms VU work per field); canyon part of the cutscene from ~1790 ~25 (~45-50 ms VU work per field, ~20% in
-  the exact FMAC path: `fmacExact<3>` 12.8% and `fmacExact<2>` 6.2% of the VU thread). The hawk fix did not
-  change the speed: interleaved A/B runs (fields 1340-1780 / 1800-2040) gave 41-45 / 25 fields/s before and
-  40-43 / 25 after; title view (Start at 1250) 50;
+  "No memory card" and logo 50 (paced); cloud cutscene from field 1215 ~37-45 (VU thread ~96% busy,
+  ~25 ms VU work per field); canyon part of the cutscene from ~1790 ~23-25 (~45-50 ms VU work per field, ~20% in
+  the exact FMAC path: `fmacExact<3>` 12.8% and `fmacExact<2>` 6.2% of the VU thread), riders/forest
+  2100-5200 ~24-26. Neither the hawk fix nor the DMA/VU0 fixes changed the speed noticeably (runs vary by
+  about 10%); title view (Start at 1250) 50;
   New Game loading and the intro (bridge, shrine, ruins) 50 up to field 3600 at least.
   Pad script for New Game: `...,1250v:start,1450v:start,1550v:cross,1700v:cross`.
+* Opening cutscene after the hawk: the dark-blue frames and the missing letterbox are fixed (see DMA chains).
+  Still different from PCSX2: the cloud-shot mist particles are drawn with a mean alpha of ~12.8 where PCSX2
+  has ~10.1, which reads as a light haze; the cutscene runs ahead of PCSX2 by ~35 fields at the hawk and
+  ~185 fields by field 4350 (no disc reads happen during it, so it is not streaming; likely frame pacing or
+  the audio clock, which the port does not model); a faint bright border shows at the frame edges from about
+  field 4350 (to be compared with PCSX2).
 * Title view: the shrine and bridge render, but the "SHADOW OF THE COLOSSUS" logo, the menu entries and the
   copyright line that PCSX2 shows are missing (unchanged by the matrix-stack fix). The New Game intro sky is purple where PCSX2 is bright white,
   and a thin magenta column shows at the right edge.
@@ -320,7 +349,7 @@ Last updated: 2026-09-25 (hawk fixed: VU0 macro VSQI/VLQD matrix stack; ninth se
 
 | Area | Blocker | Plan |
 |---|---|---|
-| Emulation speed | The opening cutscene is VU1-bound: ~40-45 fields/s in the clouds, ~25 in the canyon; everything else measured so far (title view, New Game intro) runs at the paced 50 | find which results send ~20% of the canyon's FMACs to `fmacExact` (images `2048debd5c78af0a` and `d18c8dfaae098293`) and give them a bit-exact fast path (check with `PS2X_VU1_VERIFY=1`) |
+| Emulation speed | The opening cutscene is VU1-bound: ~37-45 fields/s in the clouds, ~23-26 from the canyon on; everything else measured so far (title view, New Game intro) runs at the paced 50 | find which results send ~20% of the canyon's FMACs to `fmacExact` (images `2048debd5c78af0a` and `d18c8dfaae098293`) and give them a bit-exact fast path (check with `PS2X_VU1_VERIFY=1`) |
 | Audio | `sg2iop_driver` drives SPU2 through LIBSD imports; runtime has no IOP-side SPU2 | SPU2 register model on the IOP side feeding a host mixer |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
@@ -400,7 +429,10 @@ No game function is stubbed with placeholder return values.
 
 ## Next priorities
 
-1. The missing title logo/menu text and the intro colours;
+1. Opening cutscene: mist particle alpha (~25% above PCSX2) and cutscene pacing vs PCSX2 (find what drives the
+   demo clock), the bright border from ~4350, and the later shots (the building that partly disappears);
+   `LQ`/`SQ`/`LQC2`/`SQC2` should ignore the low 4 address bits like the EE (PCSX2 masks them; changing it
+   regenerates most files). Then the missing title logo/menu text and the intro colours;
    then play on from the intro into the first area and fix what blocks or slows it. Capture new VU1 images on
    the way (`PS2X_VU1_CAPTURE`) and regenerate `Port/generated/vu1`.
 2. Compare the opening cutscene with a PCSX2 GS dump draw for draw (clouds, hawk, cliffs); re-check the
@@ -408,8 +440,8 @@ No game function is stubbed with placeholder return values.
    bilinear quads come from the rasterizer's float barycentrics under the EE's round-toward-zero MXCSR
    (see discoveries); fixing them is a deliberate output change (e.g. fixed-point GS interpolation checked
    against PCSX2) and needs new golden recordings.
-3. VU0 register file is per context (each thread/handler has its own copy); on the PS2 it is shared.
-   Harmless so far, revisit if a game thread relies on another thread's VU0 state.
+3. VU0 registers other than R are per context (each thread/handler has its own copy); on the PS2 they are
+   shared. Sharing them all needs thread switches only where the PS2 makes them (see the haze note).
 4. Memory card on SIO2 ports 2/3.
 5. Audio: SPU2 on the IOP side.
 6. Sub-field timed waits in the scheduler; calibrate disc timing against PCSX2; IOP VBlank at the PAL rate.

@@ -162,15 +162,18 @@ alignment, opening-cutscene alignment with PCSX2; tenth session). Target: SCES-5
   at 50 fields/s, against ~2-3M pairs/s interpreted.
 * **VU1 AOT recompilation (eighth session)**, bit-exact against the interpreter:
   * `PS2X_VU1_CAPTURE=dir` writes every distinct 16 KB VU1 code image seen at MSCAL/MSCNT (`vu1_<fnv1a64>.bin`)
-    and the (image, entry PC) pairs (`entries.txt`). `Analysis/oracle/vu1_capture/` now holds 8 images and 66
-    entries (boot, cloud/canyon cutscene, title view, New Game intro up to field ~3700). New images or entries
-    run interpreted until they are captured and the code is regenerated.
+    and the (image, entry PC) pairs (`entries.txt`). `Analysis/oracle/vu1_capture/` now holds 11 images and 397
+    entries (boot, the whole opening cutscene to field 13000, title view, New Game intro up to field ~3700). The
+    compiled code covers every PC of an image, so only new images matter (entries are just resume points); new
+    images run interpreted until they are captured and the code is regenerated.
   * `ps2xTest/tools/vu1_recomp <capture-dir> Port/generated/vu1` (built in `C:/tmp/bt`, output git-ignored)
     emits per-op C++ per image: loop-aware blocks of up to 128 pairs, gotos for in-block branches, delay-slot and
     E-bit copies. Registers are written immediately with exact per-lane ready times; MAC/status/clip flags go
     through lazy FIFO rings and are folded on read; XGKICK progress is caught up lazily. FMAC ops take a fast
     path when every destination lane is safely normal (no clamping, no flag other than sign, no cancellation)
-    and fall back to the exact double-precision path otherwise. Straight-line segments get a statically
+    and fall back to the exact double-precision path otherwise; exact zeros (a zero operand of MUL/MADD/MSUB/OPMSUB
+    with the accumulator unchanged, x == -y for ADD, x == y for SUB) also stay on the fast path with their Z/S
+    flags (eleventh session; `PS2X_VU1_VERIFY` 7.6M runs to field 2006, 0 mismatches). Straight-line segments get a statically
     scheduled copy (entry checks for operand readiness, cycle snapshots instead of per-pair checks).
     `sotc_vu1_code` is built with `/arch:AVX2`.
   * `PS2X_VU1_VERIFY=1` runs every VU1 program twice (compiled, then the interpreter on a copy) and compares
@@ -360,6 +363,11 @@ alignment, opening-cutscene alignment with PCSX2; tenth session). Target: SCES-5
   2100-5200 ~24-26. Neither the hawk fix nor the DMA/VU0 fixes changed the speed noticeably (runs vary by
   about 10%); after the tenth session's FPU and sprite changes: clouds (1250-1780) ~41, canyon 1800-2500 ~25,
   2500-5200 ~25, forest/ruins 5200-7900 ~27-29 (unchanged within noise); after the COLCLAMP/triangle-rule change: clouds ~45, canyon ~27, forest/ruins ~30, the passage after the ruins (8000-9500) ~17 (new VU1 programs there are probably not captured for the AOT compiler yet); title view (Start at 1250) 50;
+  after the eleventh session (all 11 VU1 images of the cutscene compiled, exact-zero FMAC fast path, VU1 image
+  cache, templated VIF unpack): clouds ~45, canyon ~29, riders 2500-5200 ~29.5, forest/ruins 5200-7600 ~35,
+  towers 7600-7900 ~19 (was 12-17), passage 8000-9500 ~17.6. Everything is VU-thread bound (~95% busy); the
+  exact FMAC path is gone from the profile; the passage spends ~41% in one compiled block (image 2048debd,
+  block 5) whose cost is per-pair ready-cycle checks and flag-ring records;
   New Game loading and the intro (bridge, shrine, ruins) 50 up to field 3600 at least.
   Pad script for New Game: `...,1250v:start,1450v:start,1550v:cross,1700v:cross`.
 * Opening cutscene (attract demo, no Start press): side-by-side captures against PCSX2's hardware and software
@@ -374,17 +382,26 @@ alignment, opening-cutscene alignment with PCSX2; tenth session). Target: SCES-5
     +35 offset. Not changed: matching PCSX2 here would mean slowing loading down.
   * **"Building partly disappears"** (fields ~7650-7950): the towers fading into white from the bottom is the game's
     own effect and PCSX2 does the same; with the wrong offset it looked like a native bug. What differed was the
-    right-edge band and bloom placement (fixed by the sprite rule). Remaining: the light shaft between the towers is
-    slightly wider natively, and near-camera ground-haze polygons (texture 0x2E40, ALPHA 0x44) are too opaque where
-    they are clipped: at the clipped edge PCSX2's vertices carry alpha ~0x40 (interpolated) while ours carry 0x80
-    (the outside vertex's value). This shows as a brighter lower tower wall at ~7790 (the hard shading edges on the
-    arched doorway at ~7650-7700 were the COLCLAMP shadow-volume bug and are fixed). PCSX2's GS stream played through
-    our rasterizer matches PCSX2 on the same frame (compare the player's field N+1 with PCSX2's field N: the first
-    presented field of a dump is PCSX2's own composite), so the difference is in the GS commands produced natively. Neither EE clipper
-    (`sub_01182038`/`sub_01181800`) interpolates these polygons (instrumented: no calls in that field), so the
-    clipping happens in the VU1 microcode of the GL path (`glEnd` -> PATH1 packet); next step is to capture that VU1
-    program's input for one of these polygons and compare its clipped output with PCSX2 (e.g. VU1 Q/DIV pipeline
-    timing or a flag-dependent branch). Natively the rider/horse is also still drawn below the screen where PCSX2
+    right-edge band and bloom placement (fixed by the sprite rule). The hard shading edges on the arched doorway at
+    ~7650-7700 were the COLCLAMP shadow-volume bug and are fixed.
+  * **Brighter lower tower wall at ~7790 (eleventh session): random mist, not a rendering bug.** Frames cut at the
+    display copy (`D` to `tex0=1d00` into FBP 0) match PCSX2 command for command (16,761 of 16,983 lines identical):
+    the ground haze (textures 0x2E00-0x2EC0) is identical including the clipped-edge alpha. The earlier "0x80 vs
+    0x40 alpha" compared haze one frame apart, because the V (VSync) marker falls before the display copy in
+    PCSX2's dump and after the scene in ours. What differs is the set of ~16 full-screen mist planes (texture
+    0x2A00, depth-tested, alpha 0x02-0x0E) the game places at random depths and tints: at the same frame PCSX2 has
+    planes at z 3026/4305/6541/8535..., we have 3955/5012/5182/8701... Each plane shows a hard edge where it cuts
+    through the wall, and ours happen to wash out the lower wall (mean 105 vs 101). The random generator is VU0's R
+    (`iosGetRandom`, LFSR, seeded once by `iosInitRandom`). Our R equals PCSX2's exactly at every savestate up to
+    native counter 5177 (VU0 R is `VI[20]` of `vuMicroRegs` in `PCSX2 Internal Structures.dat`, 16-byte stride).
+    At the shot change at counter 5319 PCSX2 drops one frame: the game's frame delta (`0x1477270`) is 0.0393 s
+    instead of 0.0196 s at PCSX2 VBlank 5469, i.e. the first frame of the new shot takes two VBlanks on the PS2 and
+    one fewer logic update runs. From then on our random sequence is exactly one frame (169 draws) ahead of
+    PCSX2's. No disc read happens there (the shot's data streams in ~500 fields earlier), so the hitch is EE/VU/GS
+    load, which our timing model does not charge (8 cycles per dispatch, 32 per loop, nothing for VU1/GS work).
+    Reproducing PS2 frame drops would need real EE/VU/GS timing and would make the port drop frames it does not
+    have to, so it is not done. The same frame explains the haze texture scroll being ~0.1% off in S. It does not
+    explain the far mist billboards in the cloud shot (below), which happen while R is still in sync. Natively the rider/horse is also still drawn below the screen where PCSX2
     culls it (~26k off-screen vertices per field; invisible, costs time).
   * **Bright border from ~4350**: the sprite coverage rule (see above); gone.
   * **Mist haze in the cloud shot**: at the correctly aligned moment the mist's mean alpha matches PCSX2 (17.6-17.9
@@ -396,9 +413,9 @@ alignment, opening-cutscene alignment with PCSX2; tenth session). Target: SCES-5
     clipper (`glEnd` -> `sub_011823F8` -> `sub_01182038`/`sub_01181800`, `vclip` + `cfc2 $vi18`, `div.s`)
     against a projection whose z and w columns are almost equal (`z = w - 0.096`), so the depth/clip decisions for
     them are extremely sensitive to rounding; not solved.
-* Title view: the shrine and bridge render, but the "SHADOW OF THE COLOSSUS" logo, the menu entries and the
-  copyright line that PCSX2 shows are missing (unchanged by the matrix-stack fix). The New Game intro sky is purple where PCSX2 is bright white,
-  and a thin magenta column shows at the right edge.
+* Title view and New Game intro (re-checked in the eleventh session): the "SHADOW OF THE COLOSSUS" logo, the menu
+  entries and the copyright line render, and the intro sky over the bridge is bright white with no magenta column
+  at the right edge (both fixed by the tenth session's FPU/sprite/triangle changes).
 * Speed after the sixth session (fields/s, native field ranges): boot 0-270 ~51, language/50 Hz menus
   ~43-45, loading 375-731 ~46, "No memory card" + logo ~41-47, black gap before the cutscene 1133-1329
   ~27, cloud cutscene still ~1.3 (VU1). Milestones (wall s / game VBlank count, PCSX2 in brackets):
@@ -514,13 +531,16 @@ No game function is stubbed with placeholder return values.
 
 ## Next priorities
 
-1. The missing title logo/menu text and the New Game intro colours (re-check both first: the FPU and sprite fixes
-   may have changed them); then play on from the intro into the first area and fix what blocks or slows it.
-   Capture new VU1 images on the way (`PS2X_VU1_CAPTURE`) and regenerate `Port/generated/vu1`.
-   Opening-cutscene leftovers, most visible first: the clipped ground-haze polygons with wrong edge alpha (VU1 side
-   of the GL path, see Partially working; the brighter lower tower wall at ~7790; PCSX2's own stream renders correctly
-   through our GS), the far mist billboards dropped by the GL clipper, and the slightly wider light shaft at the
-   towers. VU0 macro add/sub do not get the PS2
+1. Speed: every cutscene phase is VU1-bound. Next steps in the AOT compiler: prove at compile time which
+   FMAC MAC/status results are never read (no FMAND/FMEQ/FSAND/... or status read before they are overwritten,
+   sticky bits folded once) and skip their flag-ring records; widen the statically scheduled segments so hot loops
+   (image 2048debd block 5 in the passage) run without per-pair ready-cycle checks; cull the off-screen rider.
+   Then play on from the intro into the first area and fix what blocks or slows it, capturing new VU1 images on
+   the way (`PS2X_VU1_CAPTURE`) and regenerating `Port/generated/vu1`.
+   The opening cutscene's remaining differences (tower-wall mist, far mist billboards, haze scroll) come from the
+   frame the PS2 drops at the shot change at counter ~5319 (see Partially working); only a timing model that
+   charges VU1/GS work would reproduce them. Still open: the far mist billboards in the cloud shot (~16 vs 27,
+   GL-layer EE clipper). VU0 macro add/sub do not get the PS2
    operand alignment (PCSX2's microVU does not either). The GPU backend's `SnapshotVram` should read render targets
    back so GPU recordings get correct checkpoints.
 2. Compare the opening cutscene with a PCSX2 GS dump draw for draw (clouds, hawk, cliffs); re-check the

@@ -78,14 +78,8 @@ namespace sotc
 
 namespace sotc
 {
-    void installRamDumpFromEnvironment()
+    void installRamDump(const std::string &spec)
     {
-        const char *value = std::getenv("SOTC_DUMP_RAM_AT");
-        if (!value)
-        {
-            return;
-        }
-        const std::string spec(value);
         const size_t colon = spec.find(':');
         if (colon == std::string::npos)
         {
@@ -118,7 +112,7 @@ namespace sotc
         }
         auto done = std::make_shared<std::atomic<bool>>(false);
         const auto start = std::chrono::steady_clock::now();
-        FunctionHooks::instance().observeEntry(address, "ramdump", [address, path, done, conditional, whenNotEqual, whenAddress, whenValue, afterSeconds, start](uint8_t *rdram, R5900Context *, PS2Runtime *) {
+        FunctionHooks::instance().observeEntry(address, "ramdump_" + path, [address, path, done, conditional, whenNotEqual, whenAddress, whenValue, afterSeconds, start](uint8_t *rdram, R5900Context *ctx, PS2Runtime *) {
             if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < afterSeconds)
             {
                 return;
@@ -138,8 +132,34 @@ namespace sotc
             }
             std::ofstream out(path, std::ios::binary | std::ios::trunc);
             out.write(reinterpret_cast<const char *>(rdram), PS2_RAM_SIZE);
-            SOTC_INFO(Boot, "guest RAM dumped at entry of 0x" << std::hex << address << " to " << path);
+            SOTC_INFO(Boot, "guest RAM dumped at entry of 0x" << std::hex << address << " to " << path << " R=0x"
+                                                            << static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_castps_si128(ctx->vu0_r))));
         });
+    }
+
+    void installRamDumpFromEnvironment()
+    {
+        const char *value = std::getenv("SOTC_DUMP_RAM_AT");
+        if (!value)
+        {
+            return;
+        }
+        const std::string all(value);
+        size_t begin = 0;
+        while (begin < all.size())
+        {
+            const size_t end = all.find(';', begin);
+            const std::string spec = all.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+            if (!spec.empty())
+            {
+                installRamDump(spec);
+            }
+            if (end == std::string::npos)
+            {
+                break;
+            }
+            begin = end + 1;
+        }
     }
 
     void installThreadTraceFromEnvironment()

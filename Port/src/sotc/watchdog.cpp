@@ -147,12 +147,14 @@ namespace sotc::watchdog
                     std::lock_guard<std::mutex> lock(g_watchMutex);
                     hits = ++g_watchHits[{context->Rip, i}];
                 }
-                if (hits > 3 && (hits & (hits - 1)) != 0)
+                uint32_t value = 0;
+                std::memcpy(&value, g_watchRam + watch.guest, sizeof(value));
+                static const char *const valueFilter = std::getenv("SOTC_WATCH_VALUE");
+                static const uint32_t filterValue = valueFilter ? static_cast<uint32_t>(std::stoul(valueFilter, nullptr, 16)) : 0u;
+                if (valueFilter ? value != filterValue : (hits > 3 && (hits & (hits - 1)) != 0))
                 {
                     continue;
                 }
-                uint32_t value = 0;
-                std::memcpy(&value, g_watchRam + watch.guest, sizeof(value));
                 std::string where;
                 {
                     std::lock_guard<std::mutex> lock(g_symbolMutex);
@@ -162,6 +164,27 @@ namespace sotc::watchdog
                         g_symbolsReady = SymInitialize(GetCurrentProcess(), nullptr, TRUE) == TRUE;
                     }
                     where = symbolize(GetCurrentProcess(), context->Rip);
+                    CONTEXT walk = *context;
+                    STACKFRAME64 frame{};
+                    frame.AddrPC.Offset = walk.Rip;
+                    frame.AddrPC.Mode = AddrModeFlat;
+                    frame.AddrFrame.Offset = walk.Rbp;
+                    frame.AddrFrame.Mode = AddrModeFlat;
+                    frame.AddrStack.Offset = walk.Rsp;
+                    frame.AddrStack.Mode = AddrModeFlat;
+                    for (int depth = 0; depth < 6; ++depth)
+                    {
+                        if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, GetCurrentProcess(), GetCurrentThread(), &frame, &walk, nullptr,
+                                         SymFunctionTableAccess64, SymGetModuleBase64, nullptr) ||
+                            frame.AddrPC.Offset == 0)
+                        {
+                            break;
+                        }
+                        if (depth > 0)
+                        {
+                            where += " <- " + symbolize(GetCurrentProcess(), frame.AddrPC.Offset);
+                        }
+                    }
                 }
                 const uint64_t tick = g_runtime ? g_runtime->memory().gs().vsyncTick.load() : 0;
                 SOTC_INFO(Ee, "write watch 0x" << std::hex << watch.guest << " = " << value << std::dec << " hit " << hits << " vsync " << tick

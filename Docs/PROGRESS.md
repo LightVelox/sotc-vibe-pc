@@ -1,7 +1,7 @@
 # Progress
 
-Last updated: 2026-09-25 (EE FPU add/sub alignment and round-to-nearest div/sqrt, GS sprite coverage rule, LQ/SQ
-alignment, opening-cutscene alignment with PCSX2; tenth session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
+Last updated: 2026-09-26 (twelfth session: gameplay reached, Wander controllable; intro skip fixed). Target: SCES-53326 v1.00
+(see `GAME_BUILD.md`).
 
 ## Working
 
@@ -283,6 +283,29 @@ alignment, opening-cutscene alignment with PCSX2; tenth session). Target: SCES-5
   rasterizer and GPU shader share `gs_sprite_rules.h`; seven unit tests that drew zero-size sprites to mean
   "one pixel" now draw real 1x1 sprites. Goldens re-recorded (two runs identical); `ps2x_tests` 472 (new tests
   for the FPU alignment, round-to-nearest div/sqrt, LQ/SQ masking and the sprite rule), IOP ctest 5/5.
+* **Gameplay reached (twelfth session)**: New Game -> intro -> the shrine with Wander under player control. Both routes
+  work: letting the intro play out (the Dormin dialogue ends at field ~30,000 and hands over to gameplay at the altar;
+  pad script `...,1250v:start,1450v:start,1550v:cross,1700v:cross`) and skipping it with Start (e.g. `4000v:start`,
+  gameplay at field ~4150, as in PCSX2). Tested with scripted input: walking and running (left stick), stairs, the
+  camera (right stick; same response as PCSX2 for the same input, including the game's reversed default axes), drawing
+  and swinging the sword (Circle / Square, weapon HUD and stamina bar), holding up the sword (hold Circle, focus marker as
+  in PCSX2; the altar is indoors, so no light beam there), whistling for Agro (Triangle; she gallops in), and riding
+  (tested by the user). Speed in the shrine: 25-30 fields/s, VU-thread bound (see Known blockers).
+  * **Skip crash fixed (`dispatchGuestBranch`)**: pressing Start during the intro jumped to `0x01D1FF90` (heap data). The
+    script system's `execSCRBaseFunc` calls `SCRFuncSubFunc`, which tail-jumps (`j`) back into `execSCRBaseFunc`. The tail
+    jump unwinds the host frames with `ctx->pc = 0x1467A00`, which is exactly the entry of the function
+    `updateScriptDataSystem` had called, and the "callee returned with its entry PC = implicit return" heuristic in
+    `dispatchGuestBranch` resumed `updateScriptDataSystem` with the callee's `$sp`. Its later prologue overwrote a live
+    saved `$ra` (found with `SOTC_WATCH_WRITE` on the clobbered slot and the new branch trace). The heuristic now only
+    applies when no guest jump was dispatched inside the callee (per-thread jump serial). Test: "dispatchGuestBranch call
+    does not treat a tail jump to the callee entry as a return". Goldens unchanged (all five SAME), `ps2x_tests` 474,
+    IOP ctest 5/5.
+  * **Pad script sticks**: steps accept `lleft`/`lright`/`lup`/`ldown`/`rleft`/`rright`/`rup`/`rdown` (full deflection,
+    combinable with buttons: `5900v:lup+cross:20`).
+  * **New diagnostics**: `PS2X_BRANCH_TRACE=n` keeps a per-thread ring of the last n guest calls/returns/jumps/scheduler
+    dispatches (source, target, `$sp`, `$ra`) and dumps it on a missing branch target (`PS2X_BRANCH_TRACE_FILE=path`,
+    else stderr); `PS2X_DUMP_RAM_ON_MISSING=path` writes guest RAM at that moment; `SOTC_WATCH_WRITE` now logs the host
+    call stack (the generated guest functions) and `SOTC_WATCH_VALUE=hex` logs only writes of that value.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
   with VSync rate and EE thread/semaphore snapshot (`SOTC_WATCHDOG`, `SOTC_WATCHDOG_THREADS`),
   sampling profiler (`SOTC_PROFILE=delay:seconds`), guest call tracer (`SOTC_TRACE_CALLS`), thread
@@ -413,6 +436,19 @@ alignment, opening-cutscene alignment with PCSX2; tenth session). Target: SCES-5
     clipper (`glEnd` -> `sub_011823F8` -> `sub_01182038`/`sub_01181800`, `vclip` + `cfc2 $vi18`, `div.s`)
     against a projection whose z and w columns are almost equal (`z = w - 0.096`), so the depth/clip decisions for
     them are extremely sensitive to rounding; not solved.
+* Gameplay divergences found in the shrine (twelfth session), not blockers:
+  * **Tutorial hints never appear natively.** PCSX2 with the same script (`4000v:start,4150v:cross,4300v:cross`) shows
+    "Press X to jump" at field ~5300 and "In a sunlit place, hold up the sword using O..." from ~5500; without the Cross
+    presses PCSX2 shows none either. Natively none appear with any presses tried. PCSX2 also flashes the weapon HUD at
+    ~4300-4500 right after the skip; natively the HUD only appears when the sword is drawn. `createHintWork`
+    (`0x146D460`) is called in both, with an empty hint table on the player's script work (`ctrl work + 0x40E0`) in both;
+    `startHintWork`/`SCRConditionHintPlayFunc` are never called natively. The hint table comes from a data-module symbol
+    (unresolved = the import stub `0x1B28F8`). The game int work (`_gameIWork`, pointer at `0x147761C`) matches PCSX2.
+    Heap layout differs from PCSX2 after New Game, so RAM diffs are noisy; next step is to find which script/object
+    creates the hint work with a non-empty table in PCSX2.
+  * One fail-fast crash (`0xC0000409`) at field 7664 of the naturally played intro, seen once while a second game
+    instance was running; not reproduced in two further runs (one under the debug-API script). Possibly the GPU driver
+    abort seen in the tenth session.
 * Title view and New Game intro (re-checked in the eleventh session): the "SHADOW OF THE COLOSSUS" logo, the menu
   entries and the copyright line render, and the intro sky over the bridge is bright white with no magenta column
   at the right edge (both fixed by the tenth session's FPU/sprite/triangle changes).
@@ -451,6 +487,7 @@ alignment, opening-cutscene alignment with PCSX2; tenth session). Target: SCES-5
 
 | Area | Blocker | Plan |
 |---|---|---|
+| Gameplay speed | The shrine runs at 25-30 fields/s (the game itself draws at 25 FPS there on the PS2, one frame per 2 fields), VU thread 85-95% busy; no new VU1 images (all 11 compiled). Hot spots are the same as in the cutscene passage: image `2048debd5c78af0a` block 5 (20% of the VU thread) and `d18c8dfaae098293` block 5 (16%), then `foldStatus` 4% | the planned AOT work below (dead flag-record elimination, only the last ready-time store per register in static segments) |
 | Emulation speed | The opening cutscene is VU1-bound: ~37-45 fields/s in the clouds, ~23-26 from the canyon on; everything else measured so far (title view, New Game intro) runs at the paced 50 | find which results send ~20% of the canyon's FMACs to `fmacExact` (images `2048debd5c78af0a` and `d18c8dfaae098293`) and give them a bit-exact fast path (check with `PS2X_VU1_VERIFY=1`) |
 | Audio | `sg2iop_driver` drives SPU2 through LIBSD imports; runtime has no IOP-side SPU2 | SPU2 register model on the IOP side feeding a host mixer |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
@@ -535,8 +572,10 @@ No game function is stubbed with placeholder return values.
    FMAC MAC/status results are never read (no FMAND/FMEQ/FSAND/... or status read before they are overwritten,
    sticky bits folded once) and skip their flag-ring records; widen the statically scheduled segments so hot loops
    (image 2048debd block 5 in the passage) run without per-pair ready-cycle checks; cull the off-screen rider.
-   Then play on from the intro into the first area and fix what blocks or slows it, capturing new VU1 images on
-   the way (`PS2X_VU1_CAPTURE`) and regenerating `Port/generated/vu1`.
+   Gameplay in the shrine is bound by the same two blocks, so this is now the main playability item. Then leave the
+   shrine (light beam outdoors, the plains, the first colossus) and fix what blocks or slows it, capturing new VU1
+   images on the way (`PS2X_VU1_CAPTURE`) and regenerating `Port/generated/vu1`; the tutorial-hint divergence (see
+   Partially working) may point at a script-system difference worth understanding before the colossus scripts.
    The opening cutscene's remaining differences (tower-wall mist, far mist billboards, haze scroll) come from the
    frame the PS2 drops at the shot change at counter ~5319 (see Partially working); only a timing model that
    charges VU1/GS work would reproduce them. Still open: the far mist billboards in the cloud shot (~16 vs 27,
@@ -550,7 +589,7 @@ No game function is stubbed with placeholder return values.
    against PCSX2) and needs new golden recordings.
 3. VU0 registers other than R are per context (each thread/handler has its own copy); on the PS2 they are
    shared. Sharing them all needs thread switches only where the PS2 makes them (see the haze note).
-4. Memory card on SIO2 ports 2/3.
+4. Memory card on SIO2 ports 2/3 (also needed to keep in-game options such as the camera axes).
 5. Audio: SPU2 on the IOP side.
 6. Sub-field timed waits in the scheduler; calibrate disc timing against PCSX2; IOP VBlank at the PAL rate.
 7. argv, kernel object ID numbering.

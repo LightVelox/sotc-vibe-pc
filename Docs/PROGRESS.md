@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-26 (twelfth session: gameplay reached, Wander controllable; intro skip fixed). Target: SCES-53326 v1.00
+Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints appear as in PCSX2). Target: SCES-53326 v1.00
 (see `GAME_BUILD.md`).
 
 ## Working
@@ -18,7 +18,7 @@ Last updated: 2026-09-26 (twelfth session: gameplay reached, Wander controllable
   PCSX2 at KERNEL entry.
 * **IOP**: the game's IOP modules (SIO2MAN, DBCMAN, SIO2D, DS1O_D, LIBSD, `sg2iop_driver`, MC2_D) load
   from the disc image and EE buffers and execute on the runtime's IOP emulator; the sound driver's RPC
-  server comes up.
+  server comes up. SPU2 has a voice model on the IOP side (see "Tutorial hints"), no audio output yet.
 * **Disc**: ISO-backed `cdrom0:` (VFS, IOP loader, `sceCdSearchFile` with real LBNs, raw sector reads);
   `NICO.DAT` boot data and root segment load; the sheet system links its data and re-patches code.
 * **Timing model for HLE'd I/O**: disc opens/stat/search/reads block the calling guest thread for a
@@ -306,6 +306,33 @@ Last updated: 2026-09-26 (twelfth session: gameplay reached, Wander controllable
     dispatches (source, target, `$sp`, `$ra`) and dumps it on a missing branch target (`PS2X_BRANCH_TRACE_FILE=path`,
     else stderr); `PS2X_DUMP_RAM_ON_MISSING=path` writes guest RAM at that moment; `SOTC_WATCH_WRITE` now logs the host
     call stack (the generated guest functions) and `SOTC_WATCH_VALUE=hex` logs only writes of that value.
+* **Tutorial hints (thirteenth session)**: after the intro skip, "Press X to jump" and "In a sunlit place, hold up the
+  sword using O..." appear natively with the same pad script as in PCSX2 (`4000v:start,4150v:cross,4300v:cross`; native
+  captions start at 4145/5143/5408, PCSX2 4205/5211/5481: the post-skip load is ~60 fields faster natively),
+  and neither hint appears without the Cross presses, as in PCSX2.
+  * **Root cause: no SPU2 voice model.** The hints are not the hint-work system (`createHintWork` & co. are never used
+    in PCSX2 either): they are script event demos. `SCRFuncStartEventDemo(GameModeCheck)` ->
+    `createScrEventDemoManager` (`0x146C9A0`) fills one of two slots at `0x1307498` (stride 0x58) and starts the event
+    thread `sub_0146C218`, which plays a BGM (`bgmStandby` with end callback `sub_0146CC30`), shows its caption through
+    `sub_0146C0E8` -> `DisplayCaptionTableBlock`, and only frees the slot after the BGM end callback has set
+    `+0x1C = 1`. The "Now be on thy way" event's music never ended natively, so its slot stayed busy and every later
+    event (the hints) failed to start. The BGM ends when the ADPCM stream runs out: `sg2iop_driver`'s stream thread
+    polls every voice's NAX through `sceSdGetAddr` to see which half of each double buffer is playing, and our IOP had
+    SPU2 as a plain register store, so NAX never moved.
+  * **`IopSpu2`** (`ps2xIOP/src/emulator/devices/iop_spu2.*`): both cores' registers with 16-bit access (the generic
+    hardware path turned 16-bit writes into 32-bit read-modify-writes, which would have keyed on unrelated voices),
+    2 MB SPU2 RAM filled by the real DMA channels 4/7 (IOP RAM <-> TSA, not in AutoDMA mode) and PIO (`0x1AC`), and
+    per-voice playback: KON/KOFF, pitch-rate sample counter at 48 kHz (768 IOP cycles per sample, advanced lazily to
+    the IOP cycle on each access, so it is deterministic), NAX/LSAX/ENDX with the ADPCM block loop flags and the ADSR
+    envelope (ENVX, which the driver reads for voice allocation), following PCSX2's SPU2 voice logic. No IRQ address
+    and no mixing yet. The BGM now ends at field 5126 (PCSX2 5201; it plays 1006 fields vs 1018). Goldens unchanged
+    (all five SAME), `ps2x_tests` 474, IOP ctest 6/6 (new `ps2_iop_spu2_tests`), shrine speed unchanged.
+    The naturally played intro (no skip) still matches PCSX2 scene for scene up to field 26,000 (captures every 1,000
+    fields, same Dormin lines within a few hundred fields).
+  * **PCSX2 call logging via PINE code caves** (scratch `pcsx2_hook.py`): writes `j cave` + `nop` over a function's
+    first two instructions (neither may be a branch or PC-relative); the cave saves t0-t2 on the stack, appends
+    {id, VBlank counter, a0-a3, ra, a word or a pointer chain like `[[a0+4]+8]`} to a ring at `0x00FF0000`
+    (unused in both runs), replays the two instructions and jumps back. Found the event demo path in two runs.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
   with VSync rate and EE thread/semaphore snapshot (`SOTC_WATCHDOG`, `SOTC_WATCHDOG_THREADS`),
   sampling profiler (`SOTC_PROFILE=delay:seconds`), guest call tracer (`SOTC_TRACE_CALLS`), thread
@@ -437,15 +464,15 @@ Last updated: 2026-09-26 (twelfth session: gameplay reached, Wander controllable
     against a projection whose z and w columns are almost equal (`z = w - 0.096`), so the depth/clip decisions for
     them are extremely sensitive to rounding; not solved.
 * Gameplay divergences found in the shrine (twelfth session), not blockers:
-  * **Tutorial hints never appear natively.** PCSX2 with the same script (`4000v:start,4150v:cross,4300v:cross`) shows
-    "Press X to jump" at field ~5300 and "In a sunlit place, hold up the sword using O..." from ~5500; without the Cross
-    presses PCSX2 shows none either. Natively none appear with any presses tried. PCSX2 also flashes the weapon HUD at
-    ~4300-4500 right after the skip; natively the HUD only appears when the sword is drawn. `createHintWork`
-    (`0x146D460`) is called in both, with an empty hint table on the player's script work (`ctrl work + 0x40E0`) in both;
-    `startHintWork`/`SCRConditionHintPlayFunc` are never called natively. The hint table comes from a data-module symbol
-    (unresolved = the import stub `0x1B28F8`). The game int work (`_gameIWork`, pointer at `0x147761C`) matches PCSX2.
-    Heap layout differs from PCSX2 after New Game, so RAM diffs are noisy; next step is to find which script/object
-    creates the hint work with a non-empty table in PCSX2.
+  * Tutorial hints: fixed in the thirteenth session (see Working).
+  * **Weapon HUD flash after the skip** (PCSX2 shows HP/grip/weapon HUD at ~4215-4300; native does not): load timing,
+    not the SPU2 cause. The HUD elements (`0x12FE6F0`, 4 x 0x10) are forced off by `playerlifebar_script` while the
+    screen fade (`0x14774F0`) or the letterbox (`0x1477508`) is active. The life sprites start with animation id 1
+    (bits 27-30 of the sprite word +8); the first `player_life_anim` call sees it and requests the HUD
+    (`sub_014060D0(4)`). In PCSX2 the letterbox is gone at 4129 and the fade-in runs 4164-4214, so that first request
+    lands when the HUD is allowed. Natively the post-skip load ends ~56 fields earlier: the fade-in starts at 4108 with
+    the letterbox still at 0.21, the letterbox then retracts ~5x slower, the request (~4185) is cleared by the next reset
+    and the animation is over when the HUD becomes allowed (4209). Needs disc timing closer to PCSX2, not a fix here.
   * One fail-fast crash (`0xC0000409`) at field 7664 of the naturally played intro, seen once while a second game
     instance was running; not reproduced in two further runs (one under the debug-API script). Possibly the GPU driver
     abort seen in the tenth session.
@@ -489,7 +516,7 @@ Last updated: 2026-09-26 (twelfth session: gameplay reached, Wander controllable
 |---|---|---|
 | Gameplay speed | The shrine runs at 25-30 fields/s (the game itself draws at 25 FPS there on the PS2, one frame per 2 fields), VU thread 85-95% busy; no new VU1 images (all 11 compiled). Hot spots are the same as in the cutscene passage: image `2048debd5c78af0a` block 5 (20% of the VU thread) and `d18c8dfaae098293` block 5 (16%), then `foldStatus` 4% | the planned AOT work below (dead flag-record elimination, only the last ready-time store per register in static segments) |
 | Emulation speed | The opening cutscene is VU1-bound: ~37-45 fields/s in the clouds, ~23-26 from the canyon on; everything else measured so far (title view, New Game intro) runs at the paced 50 | find which results send ~20% of the canyon's FMACs to `fmacExact` (images `2048debd5c78af0a` and `d18c8dfaae098293`) and give them a bit-exact fast path (check with `PS2X_VU1_VERIFY=1`) |
-| Audio | `sg2iop_driver` drives SPU2 through LIBSD imports; runtime has no IOP-side SPU2 | SPU2 register model on the IOP side feeding a host mixer |
+| Audio | `IopSpu2` models voice playback (addresses, loop flags, ENDX, ADSR, DMA/PIO into SPU2 RAM) but produces no samples | ADPCM decode + volume/pitch modulation/noise + reverb per core, mixed to a host audio backend fed at 48 kHz from the IOP cycle clock; SPU2 IRQ address |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
 | FMV | FFmpeg disabled | decide decoder strategy |
@@ -563,6 +590,15 @@ No game function is stubbed with placeholder return values.
   differently per binary; the game build is RelWithDebInfo and never used `/fp:fast`).
 * The GS texture page cache is intentionally stale until TEXFLUSH (tests in `ps2xTest/gs_cache`); a few
   draws per frame (bloom chain) really read stale texels, so any new rasterizer must model it exactly.
+* Script event demos: `SCRFuncStartEventDemo`/`SCRFuncStartEventDemoGameModeCheck` -> `createScrEventDemoManager`
+  (`0x146C9A0`; refuses while `[0x1479158] > 0`, when the event id is already running, or when both slots at
+  `0x1307498` are busy: slot `+0` event object, `+0x18` BGM handle, `+0x1C` BGM done, `+0x38` caption index,
+  `+0x54` caption object). Event thread `sub_0146C218`, caption thread `sub_0146C0E8`, BGM end callback
+  `sub_0146CC30`. BGM slots: 3 x 0x34 at `0x12EA308` (`+8` state 2..5 = standby..playing, 6/8 = stopping, `+0x24`
+  flags 1 play/4 stop, `+0x2C` end callback, `+0x30` its argument).
+* `sg2iop_driver` streams ADPCM through double buffers in SPU2 RAM and tracks each stream by polling NAX
+  (`sceSdGetAddr(0x2240 | voice << 1 | core)`) against the buffer halves (table at driver `+0x7248`, 2 x 24 x 0x24);
+  it reads ENVX of all 48 voices (`sceSdGetParam(0x500 | ...)`) into its table at `+0x70B8`. No SPU2 IRQ handler.
 * IOP import map: `sg2iop_driver` → libsd, sifcmd, sysclib, thbase; `DS1O_D` → sio2man, sio2d, dbcman;
   `MC2_D` → sio2man, sio2d, dbcman, secrman, cdvdman.
 
@@ -574,8 +610,9 @@ No game function is stubbed with placeholder return values.
    (image 2048debd block 5 in the passage) run without per-pair ready-cycle checks; cull the off-screen rider.
    Gameplay in the shrine is bound by the same two blocks, so this is now the main playability item. Then leave the
    shrine (light beam outdoors, the plains, the first colossus) and fix what blocks or slows it, capturing new VU1
-   images on the way (`PS2X_VU1_CAPTURE`) and regenerating `Port/generated/vu1`; the tutorial-hint divergence (see
-   Partially working) may point at a script-system difference worth understanding before the colossus scripts.
+   images on the way (`PS2X_VU1_CAPTURE`) and regenerating `Port/generated/vu1`. Scripted events that wait for their
+   music now progress (SPU2 voice model); watch for other events that wait on sound signals
+   (`bgmScriptRecvSoundSignal`) in the colossus scripts.
    The opening cutscene's remaining differences (tower-wall mist, far mist billboards, haze scroll) come from the
    frame the PS2 drops at the shot change at counter ~5319 (see Partially working); only a timing model that
    charges VU1/GS work would reproduce them. Still open: the far mist billboards in the cloud shot (~16 vs 27,
@@ -590,6 +627,6 @@ No game function is stubbed with placeholder return values.
 3. VU0 registers other than R are per context (each thread/handler has its own copy); on the PS2 they are
    shared. Sharing them all needs thread switches only where the PS2 makes them (see the haze note).
 4. Memory card on SIO2 ports 2/3 (also needed to keep in-game options such as the camera axes).
-5. Audio: SPU2 on the IOP side.
+5. Audio: mixer and host output on top of `IopSpu2` (the voice model is there).
 6. Sub-field timed waits in the scheduler; calibrate disc timing against PCSX2; IOP VBlank at the PAL rate.
 7. argv, kernel object ID numbering.

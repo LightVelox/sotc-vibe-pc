@@ -179,6 +179,30 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
   * `PS2X_VU1_VERIFY=1` runs every VU1 program twice (compiled, then the interpreter on a copy) and compares
     registers, pipeline state, VU memory and XGKICK packets (0 mismatches over 4.9M runs up to field 1785);
     `PS2X_VU1_RECOMP=0` disables the compiled code.
+  * Static segments (fourteenth session): every VF/VI latency is at most 4 cycles and ACC's is 1, so at a segment
+    entry any register written before it is ready by entry + 3; only reads at the first three positions can stall and
+    they now stall in place (no fallback to the per-pair path; the budget check adds 3 cycles of slack). Segments
+    start at every non-breaker start and run through branch targets (joined up to 24 positions). Ready times and the
+    branch-delay VI backup are stored once at segment end; branch reads resolve the backup statically. VF/VI
+    registers live in locals for the whole segment (loaded at entry, written back at exit). In segments without
+    MAC/status reads, FMAC flag records are merged: all but the last three cycles' FMACs accumulate sticky bits in two
+    SIMD registers (`fmacV`) and push one aggregated record; an exact-zero product is always on the fast path (the
+    result is the normalized ACC). Generated images are split into ~400 KB parts (`vu1_<hash>_<n>.cpp`) so the ~99
+    files build in parallel. Tried and dropped: keeping registers in locals across a whole block (MSVC codegen got
+    2.4-4.5x slower).
+  * VU1 trace bench (fourteenth session): `PS2X_VU1_TRACE=<dir>/trace.bin:<firstField>:<fields>` records every VU1
+    run (VU state + diffed VU memory, code images next to it); `build/port/bin/sotc_vu1_bench <trace> <dir>
+    [--repeat N] [--verify] [--profile] [--only <pc>]` replays it through the compiled code (ms and VU cycles per
+    field, per image and entry) or verifies compiled vs interpreter for every run in seconds. Configure with
+    `-DSOTC_VU1_ALT_DIR=<dir>` to also build `sotc_vu1_bench_alt` from another generated directory for A/B tests.
+  * VU1 timing model (fourteenth session, default on, user decision): VU1 cycles are EE cycles (same clock). A VIF1
+    DMA start records its EE cycle; a D1_CHCR read waits for the VU thread, charges the VU1 cycles executed since then
+    (`busyUntil = max(busyUntil, kick) + cycles`) and, while the EE is early, consumes EE cycles
+    (`EeScheduler::consumeCycles`, stops at scheduler events) and reports STR busy. The kernel's
+    `iosDmaSendPath1` polls D1_CHCR/VIF1_STAT/VPU_STAT before every send, so the EE waits like on a PS2 and
+    overloaded shots draw every other field (towers ~50%, passage ~80% of frames 0.0392 s) at real-time speed.
+    `PS2X_VU1_TIMING=0` disables it, a fraction scales it. The cutscene golden was re-recorded for it (SAME with the
+    model off).
 * **GPU GS renderer (eighth session, default)**: `GSGpuBackend` (OpenGL 4.6 compute on the GS worker thread,
   own WGL context and loader) keeps the 4 MB of GS memory in an SSBO with the swizzle tables and ports the
   reference rasterizer to GLSL. Primitives are binned into 16x16 tiles, one workgroup per tile draws them in
@@ -406,6 +430,24 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
 
 ## Partially working
 
+* Speed after the fourteenth session (fields/s, MTVU + GPU renderer, RTX 3060 / Ryzen 5 5500; baseline at the start
+  of the session in brackets): clouds 49.5 (42.6), canyon 40 (27.9), riders 37.5 (27.5), forest/ruins 39 (32.8),
+  towers 39 (17.1), passage 39.6 (15.8); shrine gameplay ~32 (25-30). Measured with the VU1 timing model and the
+  experimental GPU changes that were reverted afterwards (see below); VU1-program time per field in the trace bench
+  fell 35-40% (passage 19.3 -> 14.2 ms, towers 72 -> 47 ms, shrine 18 -> 14 ms). VU1 load per field
+  (bench cycle counter): towers 11.1M, passage 4.0M, shrine 4.1M VU1 cycles; a PS2 VU1 does 5.9M per field. One
+  entry (image 2048debd, pc 0x05B0: ~12 vertices per MSCAL, 23.6k MSCALs per field in the towers) is 60-70% of all
+  VU1 work. Remaining limits: the VU thread in the canyon/riders/towers/passage (~80% busy), and the **GPU GS
+  renderer in the shrine** (~70 ms GPU per game frame, 14 presents/s). GS GPU findings (replay of a 10-field shrine
+  recording, `PS2X_GS_GPU_PROF=1` profiler kept in scratch, not committed): raster 286 ms, uploads 29 ms, CLUT 11 ms
+  per 10 fields; the main scene (FBP 0xE8) is split into ~82 dispatches per field, almost all by host->local
+  uploads: first by palettes overwritten while a queued CLUT load still needs them (fixable by dispatching queued
+  CLUT loads early), then by textures streamed into pages the pending batch still samples (write-after-read; would
+  need copy-on-write pages); removing all upload flushes cuts raster ~33%. The shadow-volume pass into FBP 0x178
+  (~5,700 full-screen triangles, 15-18 ms per dispatch in the intro) is the single most expensive dispatch.
+  8x8 tiles with shared-memory primitive staging were 11% faster in the replay but made the NVIDIA driver hang/abort
+  in-game (New Game intro ~3620-3666, froze the user's PC); reverted. fp64 Z interpolation and per-thread
+  framebuffer/Z caching were not the bottleneck.
 * Speed after the eighth session (fields/s, default MTVU + GPU renderer, RTX 3060): boot, menus, loading,
   "No memory card" and logo 50 (paced); cloud cutscene from field 1215 ~37-45 (VU thread ~96% busy,
   ~25 ms VU work per field); canyon part of the cutscene from ~1790 ~23-25 (~45-50 ms VU work per field, ~20% in
@@ -514,8 +556,8 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
 
 | Area | Blocker | Plan |
 |---|---|---|
-| Gameplay speed | The shrine runs at 25-30 fields/s (the game itself draws at 25 FPS there on the PS2, one frame per 2 fields), VU thread 85-95% busy; no new VU1 images (all 11 compiled). Hot spots are the same as in the cutscene passage: image `2048debd5c78af0a` block 5 (20% of the VU thread) and `d18c8dfaae098293` block 5 (16%), then `foldStatus` 4% | the planned AOT work below (dead flag-record elimination, only the last ready-time store per register in static segments) |
-| Emulation speed | The opening cutscene is VU1-bound: ~37-45 fields/s in the clouds, ~23-26 from the canyon on; everything else measured so far (title view, New Game intro) runs at the paced 50 | find which results send ~20% of the canyon's FMACs to `fmacExact` (images `2048debd5c78af0a` and `d18c8dfaae098293`) and give them a bit-exact fast path (check with `PS2X_VU1_VERIFY=1`) |
+| Gameplay speed | The shrine runs at ~32 fields/s (the game draws at 25 FPS there, one frame per 2 fields); the VU thread is only ~63% busy: the GPU GS renderer needs ~70 ms of GPU per frame (see Partially working) | fewer raster dispatches (early CLUT dispatch on palette uploads, copy-on-write texture pages), cheaper shadow-volume pass; any shader change must be tested in-game (8x8 tiles hung the driver) |
+| Emulation speed | Opening cutscene: clouds ~50, canyon ~40, riders ~37, forest ~39, towers ~39, passage ~40; VU-thread bound (~80% busy), 60-70% of VU1 work in one microprogram (image 2048debd entry 0x05B0) | more AOT codegen work measured with `sotc_vu1_bench` (per-FMAC safety check, per-MSCAL fixed cost ~260 ns, VIF unpack) |
 | Audio | `IopSpu2` models voice playback (addresses, loop flags, ENDX, ADSR, DMA/PIO into SPU2 RAM) but produces no samples | ADPCM decode + volume/pitch modulation/noise + reverb per core, mixed to a host audio backend fed at 48 kHz from the IOP cycle clock; SPU2 IRQ address |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
@@ -604,15 +646,15 @@ No game function is stubbed with placeholder return values.
 
 ## Next priorities
 
-1. Speed: every cutscene phase is VU1-bound. Next steps in the AOT compiler: prove at compile time which
-   FMAC MAC/status results are never read (no FMAND/FMEQ/FSAND/... or status read before they are overwritten,
-   sticky bits folded once) and skip their flag-ring records; widen the statically scheduled segments so hot loops
-   (image 2048debd block 5 in the passage) run without per-pair ready-cycle checks; cull the off-screen rider.
-   Gameplay in the shrine is bound by the same two blocks, so this is now the main playability item. Then leave the
-   shrine (light beam outdoors, the plains, the first colossus) and fix what blocks or slows it, capturing new VU1
-   images on the way (`PS2X_VU1_CAPTURE`) and regenerating `Port/generated/vu1`. Scripted events that wait for their
-   music now progress (SPU2 voice model); watch for other events that wait on sound signals
-   (`bgmScriptRecvSoundSignal`) in the colossus scripts.
+1. Speed (target: paced 50 fields/s everywhere). Shrine gameplay is now GPU-renderer bound: cut the main scene's
+   raster dispatches (dispatch queued CLUT loads early instead of flushing on palette uploads, then copy-on-write
+   texture pages for streamed textures), make the shadow-volume pass cheaper, and reduce the GS thread's CPU work
+   (~37 ms per frame outside GPU waits); validate every shader change in-game, not only in `gs_replay`. The cutscene
+   is VU-thread bound (~80% busy): keep optimizing the AOT code with `sotc_vu1_bench` (FMAC safety checks, the
+   ~260 ns fixed cost per MSCAL, VIF unpack), cull the off-screen rider. Check the game's 60 Hz mode too (4.9M VU1
+   cycles per field). Then leave the shrine (light beam outdoors, the plains, the first colossus), capturing new VU1
+   images (`PS2X_VU1_CAPTURE`) and regenerating `Port/generated/vu1`. Scripted events that wait for their music now
+   progress (SPU2 voice model); watch for other events waiting on sound signals (`bgmScriptRecvSoundSignal`).
    The opening cutscene's remaining differences (tower-wall mist, far mist billboards, haze scroll) come from the
    frame the PS2 drops at the shot change at counter ~5319 (see Partially working); only a timing model that
    charges VU1/GS work would reproduce them. Still open: the far mist billboards in the cloud shot (~16 vs 27,

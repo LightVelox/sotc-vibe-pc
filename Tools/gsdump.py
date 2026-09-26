@@ -75,7 +75,8 @@ class Gs:
         elif reg in (XYZF2, XYZ2, XYZF3, XYZ3):
             x, y = bits(v, 0, 16), bits(v, 16, 16)
             z = bits(v, 32, 24) if reg in (XYZF2, XYZF3) else bits(v, 32, 32)
-            self.kick(x, y, z, reg in (XYZF2, XYZ2))
+            f = bits(v, 56, 8) if reg in (XYZF2, XYZF3) else bits(getattr(self, "fog", 0), 56, 8)
+            self.kick(x, y, z, reg in (XYZF2, XYZ2), f)
         elif reg in CTX_REGS:
             c = 0 if reg in (TEX0_1, CLAMP_1, TEX1_1, XYOFFSET_1, SCISSOR_1, ALPHA_1, TEST_1, FBA_1, FRAME_1, ZBUF_1) else 1
             self.ctx[c][CTX_REGS[reg]] = v
@@ -92,9 +93,9 @@ class Gs:
             if name:
                 self.env[name] = v
 
-    def kick(self, x, y, z, draw):
+    def kick(self, x, y, z, draw, f=0):
         p = self.prim_attrs()
-        vert = (x, y, z, self.rgbaq, self.st, self.uv)
+        vert = (x, y, z, self.rgbaq, self.st, self.uv, f)
         self.queue.append(vert)
         t = p & 7
         need = NEEDED.get(t, 0)
@@ -130,13 +131,13 @@ class Gs:
             bits(sc, 0, 11), bits(sc, 16, 11), bits(sc, 32, 11), bits(sc, 48, 11), bits(ofs, 0, 16), bits(ofs, 32, 16),
             bits(texa, 0, 8), bits(texa, 15, 1), bits(texa, 32, 8), self.env.get("PABE", 0) & 1, self.env.get("DTHE", 0),
             self.env.get("COLCLAMP", 0))
-        for x, y, z, rgbaq, st, uv in verts:
+        for x, y, z, rgbaq, st, uv, f in verts:
             s = struct.unpack("<f", struct.pack("<I", st & 0xFFFFFFFF))[0]
             tt = struct.unpack("<f", struct.pack("<I", st >> 32))[0]
             q = struct.unpack("<f", struct.pack("<I", rgbaq >> 32))[0]
-            line += " | %.2f,%.2f z=%d rgba=%02x%02x%02x%02x uv=%.2f,%.2f st=%g,%g q=%g" % (
+            line += " | %.2f,%.2f z=%d rgba=%02x%02x%02x%02x uv=%.2f,%.2f st=%g,%g q=%g f=%u" % (
                 x / 16, y / 16, z, bits(rgbaq, 0, 8), bits(rgbaq, 8, 8), bits(rgbaq, 16, 8), bits(rgbaq, 24, 8),
-                bits(uv, 0, 14) / 16, bits(uv, 16, 14) / 16, s, tt, q)
+                bits(uv, 0, 14) / 16, bits(uv, 16, 14) / 16, s, tt, q, f)
         self.out.write(line + "\n")
 
     def packed(self, desc, lo, hi):
@@ -200,6 +201,7 @@ def main():
     ap.add_argument("--out", default="-")
     ap.add_argument("--vram")
     ap.add_argument("--screenshot")
+    ap.add_argument("--export")
     args = ap.parse_args()
     d = open(args.dump, "rb").read()
     magic, header_size = struct.unpack_from("<II", d, 0)
@@ -234,6 +236,31 @@ def main():
             tick, pmode, smode2, dispfb1, display1, dispfb2, display2, bg)
 
     out.write(vline(regs))
+    exp = open(args.export, "wb") if args.export else None
+    if exp:
+        exp.write(b"PS2XGSD1")
+        exp.write(state[vram_off:vram_off + 4 * 1024 * 1024])
+        init = []
+        for name, reg in (("PRMODECONT", 0x1A), ("TEXCLUT", 0x1C), ("SCANMSK", 0x22), ("TEXA", 0x3B), ("FOGCOL", 0x3D),
+                          ("DIMX", 0x44), ("DTHE", 0x45), ("COLCLAMP", 0x46), ("PABE", 0x49), ("BITBLTBUF", 0x50),
+                          ("TRXPOS", 0x51), ("TRXREG", 0x52)):
+            init.append((reg, gs.env[name]))
+        ctx_addr = {"XYOFFSET": 0x18, "TEX1": 0x14, "CLAMP": 0x08, "MIPTBP1": 0x34, "MIPTBP2": 0x36, "SCISSOR": 0x40,
+                    "ALPHA": 0x42, "TEST": 0x47, "FBA": 0x4A, "FRAME": 0x4C, "ZBUF": 0x4E, "TEX0": 0x06}
+        for c in range(2):
+            for name in ["XYOFFSET", "TEX1", "CLAMP", "MIPTBP1", "MIPTBP2", "SCISSOR", "ALPHA", "TEST", "FBA", "FRAME", "ZBUF", "TEX0"]:
+                init.append((ctx_addr[name] + c, gs.ctx[c][name]))
+        init += [(0x00, gs.env["PRIM"]), (0x01, gs.rgbaq), (0x02, gs.st), (0x03, gs.uv), (0x0A, gs.fog)]
+        exp.write(struct.pack("<I", len(init)))
+        for reg, val in init:
+            exp.write(struct.pack("<BQ", reg, val))
+
+    def export_vsync(r):
+        if exp:
+            vals = [struct.unpack_from("<Q", r, off)[0] for off in (0, 0x20, 0x70, 0x80, 0x90, 0xA0, 0xE0)]
+            exp.write(b"\x01" + struct.pack("<7Q", *vals))
+
+    export_vsync(regs)
     while o < len(d):
         kind = d[o]
         o += 1
@@ -241,12 +268,15 @@ def main():
             path = d[o]
             size = struct.unpack_from("<I", d, o + 1)[0]
             o += 5
+            if exp:
+                exp.write(b"\x00" + struct.pack("<I", size) + d[o:o + size])
             gs.gif(d[o:o + size])
             o += size
         elif kind == 1:
             o += 1
             tick += 1
             out.write(vline(regs))
+            export_vsync(regs)
         elif kind == 2:
             o += 4
         elif kind == 3:

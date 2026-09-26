@@ -196,7 +196,8 @@ namespace sotc
                     SOTC_INFO(Ee, "call #" << n << " 0x" << std::hex << address << " a0=" << getRegU32(ctx, 4) << " a1=" << getRegU32(ctx, 5)
                                           << " a2=" << getRegU32(ctx, 6) << " a3=" << getRegU32(ctx, 7) << " ra=" << getRegU32(ctx, 31)
                                           << " sp=" << getRegU32(ctx, 29) << std::dec << " f12=" << ctx->f[12] << " f13=" << ctx->f[13]
-                                          << " f14=" << ctx->f[14] << " f15=" << ctx->f[15]);
+                                          << " f14=" << ctx->f[14] << " f15=" << ctx->f[15] << " R=0x" << std::hex
+                                          << static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_castps_si128(ctx->vu0_r))) << std::dec);
                 }
             });
         }

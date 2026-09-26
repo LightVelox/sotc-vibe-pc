@@ -1,6 +1,7 @@
 # Progress
 
-Last updated: 2026-09-25 (DMA chains past 4096 tags, VU0 random/FTOI/ABS, VU0 macro audit; ninth session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
+Last updated: 2026-09-25 (EE FPU add/sub alignment and round-to-nearest div/sqrt, GS sprite coverage rule, LQ/SQ
+alignment, opening-cutscene alignment with PCSX2; tenth session). Target: SCES-53326 v1.00 (see `GAME_BUILD.md`).
 
 ## Working
 
@@ -237,6 +238,48 @@ Last updated: 2026-09-25 (DMA chains past 4096 tags, VU0 random/FTOI/ABS, VU0 ma
   this game; all five goldens are unchanged. Found with `SOTC_WATCH_WRITE` on the hawk's node-matrix array.
 * **EE FPU / VU0 macro semantics**: saturation instead of Inf/NaN, EE divide by zero, `sqrt(|x|)`,
   `VRSQRT = fs/sqrt(|ft|)`, `CVT.W.S` saturation; MXCSR round-toward-zero + FTZ/DAZ on the game thread.
+* **GS COLCLAMP and triangle fill rule (tenth session)**: the blend now honours COLCLAMP: with COLCLAMP = 0 the
+  blended colour keeps its low 8 bits (wraps) instead of saturating. The game draws the characters' shadow volumes by
+  adding 1 for front faces and 255 (-1) for back faces into FBP 0x178 with COLCLAMP = 0, ALPHA test NEVER/AFAIL
+  FB_ONLY and ZTST GEQUAL, then uses the non-zero pixels as a shadow mask; with saturation a back face drawn before
+  its front face left 255 instead of 0, so a hard-edged hull-shaped shadow followed the rider (canyon ~2740, courtyard
+  arch ~7650-7700, passage ~8600-8900). Found by playing PCSX2's exact GS stream through our GS (`gs_replay
+  --gsdump`, with `GS_REPLAY_SNAPSHOTS=first:last:every` VRAM snapshots mid-frame) and inspecting the count buffer.
+  Triangles now use the GS rule: vertices in 12.4 fixed point, samples at integer pixel positions, exact integer edge
+  functions with a top-left tie rule (every pixel on a shared edge belongs to exactly one triangle), barycentric
+  weights from the same integers (`gs_triangle_rules.h`, used by the CPU fast path, CPU fallback, reference rasterizer
+  and, with `imulExtended`/`uaddCarry` 32-bit arithmetic, the GPU shader). The old rule sampled at `x + 0.5` and
+  accepted pixels within 1e-4 of any edge, so shared edges were drawn twice. A first GPU version evaluated the edges
+  in double precision per pixel (with a double division); on a GeForce that was slow enough in heavy scenes for the
+  OpenGL driver to abort the process (fail-fast code 7 from the driver inside raylib's frame presentation, at random
+  fields). Tests: a COLCLAMP wrap/saturate test; the triangle-fan hole test now reads pixels through the CT32 swizzle
+  (it read VRAM linearly and only passed because the old rule also covered the border row); the two STQ tests shift
+  their triangle by half a pixel so the sampled point is the same as before. Goldens re-recorded (two runs identical).
+  `Port/src/main.cpp` installs a terminate/SIGABRT handler that prints a symbolized stack; fail-fast crashes need a
+  debugger (a small Win32 debug-API script was used).
+* **EE FPU rounding like PCSX2 (tenth session)**: `ADD.S`/`SUB.S`/`ADDA`/`SUBA`/`MADD`/`MSUB`/`MADDA`/`MSUBA`
+  now align their operands like the PS2 adder (PCSX2 `FPU_ADD_SUB`): when the exponents differ by 25 or more the
+  smaller operand becomes a signed zero, otherwise its mantissa bits below the shifted-out position are cleared
+  before the (round-toward-zero) add, so `1 - tiny = 1.0` instead of `0.99999994`. `DIV.S`, `SQRT.S` and
+  `RSQRT.S` round to nearest, as PCSX2 does (`recDIV_S`/`recSQRT_S`/`recRSQRT_S` switch MXCSR). Found through
+  the game's boot-time sin/cos table (`InitTableSinCos`, 16,385 floats at `0x1FE0C0` from the game's own `sinf`/
+  `cosf`): 14,859 entries were 1 ulp lower than in PCSX2 and sin(90 deg) ended at `sqrt(2^-23)` instead of 0; every
+  table-based rotation (e.g. the mist emitters' quaternions) was 0.04 deg off. The table now matches PCSX2 bit for
+  bit, the mist emitter structs match PCSX2's RAM, and the language-menu text vertices match a PCSX2 GS dump
+  (52/52, was 32/52; e.g. x = 2028.00 instead of 2027.94). All goldens were re-recorded for this intended change.
+* **LQ/SQ/LQC2/SQC2 ignore the low 4 address bits** like the EE (the masking lives in the runtime's 128-bit
+  read/write helpers, so no regeneration was needed). No golden changed.
+* **GS sprite coverage rule (tenth session)**: sprites now cover pixels `ceil(x0)` to `ceil(x1) - 1` (and the same
+  for y), with attributes evaluated at the integer pixel position `t0 + (x - x0) * dt/dx`, fractional FST UVs
+  (`UV / 16`, the 4 fraction bits used to be dropped) and the exact XYOFFSET, as the GS and PCSX2's software
+  renderer (`DrawSprite`) do; zero-width sprites draw nothing. The old rule truncated the vertex coordinates and
+  sampled at `x - trunc(x0) + 0.5`, so the game's `-0.5`-offset post-process sprites (display copy `-0.5..511.5`,
+  bloom downsamples `-0.5..255.5` with `u = 0..512`) missed their last column and each bloom level was shifted by
+  up to a texel. That was the faint bright/dark band at the right edge of the opening cutscene (a black last display
+  column plus a ~12-pixel falloff) and part of the wider bloom halo. CPU fast path, CPU fallback, reference
+  rasterizer and GPU shader share `gs_sprite_rules.h`; seven unit tests that drew zero-size sprites to mean
+  "one pixel" now draw real 1x1 sprites. Goldens re-recorded (two runs identical); `ps2x_tests` 472 (new tests
+  for the FPU alignment, round-to-nearest div/sqrt, LQ/SQ masking and the sprite rule), IOP ctest 5/5.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
   with VSync rate and EE thread/semaphore snapshot (`SOTC_WATCHDOG`, `SOTC_WATCHDOG_THREADS`),
   sampling profiler (`SOTC_PROFILE=delay:seconds`), guest call tracer (`SOTC_TRACE_CALLS`), thread
@@ -269,6 +312,19 @@ Last updated: 2026-09-25 (DMA chains past 4096 tags, VU0 random/FTOI/ABS, VU0 ma
   `PS2X_GS_GOLDEN_DUMP=prefix` writes expected/actual VRAM on a mismatch). The text trace alone cannot
   drive an exact replay (coordinates are printed with two decimals).
   `SOTC_PROFILE_THREAD=GSThread` makes `SOTC_PROFILE` sample the GS thread instead of the game thread.
+  Both `gs_replay --text` and `Tools/gsdump.py` print the per-vertex fog as `f=`; `SOTC_TRACE_CALLS` also prints
+  the VU0 R register. `PS2X_GS_RECORD` paths are relative to the game's working directory (the repo root) and a
+  missing directory fails silently, so pass absolute paths. The recorder's per-field checkpoints (`Op::Field`)
+  can hold stale VRAM (seen with both the GPU and the CPU renderer late in the cutscene: the scene buffer still
+  showed the cloud shot), so do not trust checkpoint VRAM or the first replayed field of a window that starts
+  mid-game; the command stream itself is fine. To be investigated.
+  `Tools/gsdump.py <dump.gs> --export out.bin` converts a PCSX2 GS dump into VRAM + GS register state + the raw
+  GIF stream + per-vsync display registers, and `gs_replay --gsdump out.bin [cpu|ref|gpu] [dir]` plays it through
+  our GS and writes one presented PNG per vsync plus the final VRAM. Playing PCSX2's exact stream through our
+  rasterizer and comparing with PCSX2's own output separates GS differences from EE/VU differences (the tower shot
+  at native ~7790 reproduces PCSX2's software renderer: mean 101.5 vs 100.5). Take such dumps with PCSX2's
+  software renderer (`Renderer = 13` in `inis/PCSX2.ini`): the hardware renderer's dumps have empty render targets
+  in VRAM.
   `SOTC_PROFILE` takes several windows (`8:3,31:10`), samples raw PCs (~450 samples/s) and reports self
   time per function and per source line, inclusive time and the callers of the top functions.
   `SOTC_TIMELINE=file` logs the wall time of every field (`SOTC_TIMELINE_WATCH=addr,...` adds guest words);
@@ -302,15 +358,44 @@ Last updated: 2026-09-25 (DMA chains past 4096 tags, VU0 random/FTOI/ABS, VU0 ma
   ~25 ms VU work per field); canyon part of the cutscene from ~1790 ~23-25 (~45-50 ms VU work per field, ~20% in
   the exact FMAC path: `fmacExact<3>` 12.8% and `fmacExact<2>` 6.2% of the VU thread), riders/forest
   2100-5200 ~24-26. Neither the hawk fix nor the DMA/VU0 fixes changed the speed noticeably (runs vary by
-  about 10%); title view (Start at 1250) 50;
+  about 10%); after the tenth session's FPU and sprite changes: clouds (1250-1780) ~41, canyon 1800-2500 ~25,
+  2500-5200 ~25, forest/ruins 5200-7900 ~27-29 (unchanged within noise); after the COLCLAMP/triangle-rule change: clouds ~45, canyon ~27, forest/ruins ~30, the passage after the ruins (8000-9500) ~17 (new VU1 programs there are probably not captured for the AOT compiler yet); title view (Start at 1250) 50;
   New Game loading and the intro (bridge, shrine, ruins) 50 up to field 3600 at least.
   Pad script for New Game: `...,1250v:start,1450v:start,1550v:cross,1700v:cross`.
-* Opening cutscene after the hawk: the dark-blue frames and the missing letterbox are fixed (see DMA chains).
-  Still different from PCSX2: the cloud-shot mist particles are drawn with a mean alpha of ~12.8 where PCSX2
-  has ~10.1, which reads as a light haze; the cutscene runs ahead of PCSX2 by ~35 fields at the hawk and
-  ~185 fields by field 4350 (no disc reads happen during it, so it is not streaming; likely frame pacing or
-  the audio clock, which the port does not model); a faint bright border shows at the frame edges from about
-  field 4350 (to be compared with PCSX2).
+* Opening cutscene (attract demo, no Start press): side-by-side captures against PCSX2's hardware and software
+  renderers now match shot for shot (clouds, hawk, canyon, riders, forest, courtyard, the ruined towers that fade
+  into white) within 1-2 grey levels of mean brightness. Findings of the tenth session:
+  * **Pacing is identical**: the demo clock is the game's scaled frame time (`0x1477270`, from the EE T0 count via
+    `iosGetTCount`, 0.0196 s per frame, one frame per field in both); `sub_013DF6C0` passes it to
+    `ExecLwsDemoOrientManagerObj`. The camera position (`0x13018A0`) matches PCSX2 to 0.00 units with a constant
+    offset: native field N shows what PCSX2 shows at N + 147 (native field numbering), from the first cutscene
+    frame to the end. Native simply starts the cutscene 2.9 s earlier because the pre-cutscene load finishes sooner
+    (disc model, see the timing notes). The earlier "35 growing to 185 fields" came from comparing at a guessed
+    +35 offset. Not changed: matching PCSX2 here would mean slowing loading down.
+  * **"Building partly disappears"** (fields ~7650-7950): the towers fading into white from the bottom is the game's
+    own effect and PCSX2 does the same; with the wrong offset it looked like a native bug. What differed was the
+    right-edge band and bloom placement (fixed by the sprite rule). Remaining: the light shaft between the towers is
+    slightly wider natively, and near-camera ground-haze polygons (texture 0x2E40, ALPHA 0x44) are too opaque where
+    they are clipped: at the clipped edge PCSX2's vertices carry alpha ~0x40 (interpolated) while ours carry 0x80
+    (the outside vertex's value). This shows as a brighter lower tower wall at ~7790 (the hard shading edges on the
+    arched doorway at ~7650-7700 were the COLCLAMP shadow-volume bug and are fixed). PCSX2's GS stream played through
+    our rasterizer matches PCSX2 on the same frame (compare the player's field N+1 with PCSX2's field N: the first
+    presented field of a dump is PCSX2's own composite), so the difference is in the GS commands produced natively. Neither EE clipper
+    (`sub_01182038`/`sub_01181800`) interpolates these polygons (instrumented: no calls in that field), so the
+    clipping happens in the VU1 microcode of the GL path (`glEnd` -> PATH1 packet); next step is to capture that VU1
+    program's input for one of these polygons and compare its clipped output with PCSX2 (e.g. VU1 Q/DIV pipeline
+    timing or a flag-dependent branch). Natively the rider/horse is also still drawn below the screen where PCSX2
+    culls it (~26k off-screen vertices per field; invisible, costs time).
+  * **Bright border from ~4350**: the sprite coverage rule (see above); gone.
+  * **Mist haze in the cloud shot**: at the correctly aligned moment the mist's mean alpha matches PCSX2 (17.6-17.9
+    vs 17.7-18.9; the earlier 12.8 vs 10.1 compared different moments). The particle lists in RAM are identical to
+    PCSX2 (same 298 particles, same list nodes, same emitter state), and the near particles are drawn identically
+    (same depths and alphas). The difference is the far mist emitter: natively it emits the same particles in the
+    same order as PCSX2 but stops after ~16 visible billboards where PCSX2 draws ~27, so natively the clouds are
+    slightly less hazy (std 9.7 vs 8.1). These billboards surround the camera and are clipped by the GL layer's EE
+    clipper (`glEnd` -> `sub_011823F8` -> `sub_01182038`/`sub_01181800`, `vclip` + `cfc2 $vi18`, `div.s`)
+    against a projection whose z and w columns are almost equal (`z = w - 0.096`), so the depth/clip decisions for
+    them are extremely sensitive to rounding; not solved.
 * Title view: the shrine and bridge render, but the "SHADOW OF THE COLOSSUS" logo, the menu entries and the
   copyright line that PCSX2 shows are missing (unchanged by the matrix-stack fix). The New Game intro sky is purple where PCSX2 is bright white,
   and a thin magenta column shows at the right edge.
@@ -405,8 +490,8 @@ No game function is stubbed with placeholder return values.
   buffer at FBP 0 at the start of the next frame. FBP 0x150 aliases the font texture (TBP 0x2A00, PSMT4
   128×128, CLUT CBP 0x3F3B CSM1), so the game re-uploads the font every frame through VIF1 `DIRECT`
   (`DIRECT 1` = IMAGE tag, then `DIRECT n` in the REF tag's TTE word = pixels).
-* The game's TEX1.K for the menu text differs from PCSX2 (0xFEC vs 0xFCE); harmless here because both
-  select magnification, but it points at an EE float difference worth checking later.
+* The game's TEX1.K for the menu text now matches PCSX2 (0xFCE); menu text positions also match since the EE FPU
+  add/sub alignment fix.
 * Solar flare: `solarFlare` (`0x01196EA0`) switches on `0x0128FE70` (1 -> `sub_01193A78`, 2 ->
   `sub_011952E0`; PCSX2 and native both have 2, colour d0c498). `sub_011952E0` projects the sun direction
   (`0x01296320`, z = sqrt(1-x^2-y^2), x40000) through `get_cur_camera_context()+0x5A0` and draws only if
@@ -429,12 +514,15 @@ No game function is stubbed with placeholder return values.
 
 ## Next priorities
 
-1. Opening cutscene: mist particle alpha (~25% above PCSX2) and cutscene pacing vs PCSX2 (find what drives the
-   demo clock), the bright border from ~4350, and the later shots (the building that partly disappears);
-   `LQ`/`SQ`/`LQC2`/`SQC2` should ignore the low 4 address bits like the EE (PCSX2 masks them; changing it
-   regenerates most files). Then the missing title logo/menu text and the intro colours;
-   then play on from the intro into the first area and fix what blocks or slows it. Capture new VU1 images on
-   the way (`PS2X_VU1_CAPTURE`) and regenerate `Port/generated/vu1`.
+1. The missing title logo/menu text and the New Game intro colours (re-check both first: the FPU and sprite fixes
+   may have changed them); then play on from the intro into the first area and fix what blocks or slows it.
+   Capture new VU1 images on the way (`PS2X_VU1_CAPTURE`) and regenerate `Port/generated/vu1`.
+   Opening-cutscene leftovers, most visible first: the clipped ground-haze polygons with wrong edge alpha (VU1 side
+   of the GL path, see Partially working; the brighter lower tower wall at ~7790; PCSX2's own stream renders correctly
+   through our GS), the far mist billboards dropped by the GL clipper, and the slightly wider light shaft at the
+   towers. VU0 macro add/sub do not get the PS2
+   operand alignment (PCSX2's microVU does not either). The GPU backend's `SnapshotVram` should read render targets
+   back so GPU recordings get correct checkpoints.
 2. Compare the opening cutscene with a PCSX2 GS dump draw for draw (clouds, hawk, cliffs); re-check the
    menu against PCSX2 now that the solar flare is gone. The faint horizontal stripes on full-screen
    bilinear quads come from the rasterizer's float barycentrics under the EE's round-toward-zero MXCSR

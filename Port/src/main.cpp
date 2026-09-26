@@ -26,6 +26,10 @@ void registerGeneratedVu1Programs();
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
+#include <dbghelp.h>
+#include <csignal>
+#include <cstdio>
+#include <cstring>
 #endif
 
 namespace
@@ -43,6 +47,63 @@ namespace
         return std::filesystem::current_path();
     }
 
+#if defined(_WIN32)
+    void printStackTrace()
+    {
+        void *frames[48];
+        const USHORT count = CaptureStackBackTrace(0, 48, frames, nullptr);
+        HANDLE process = GetCurrentProcess();
+        SymInitialize(process, nullptr, TRUE);
+        alignas(SYMBOL_INFO) char storage[sizeof(SYMBOL_INFO) + 256];
+        auto *symbol = reinterpret_cast<SYMBOL_INFO *>(storage);
+        for (USHORT i = 0; i < count; ++i)
+        {
+            std::memset(storage, 0, sizeof(storage));
+            symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+            symbol->MaxNameLen = 255;
+            DWORD64 displacement = 0;
+            const DWORD64 address = reinterpret_cast<DWORD64>(frames[i]);
+            IMAGEHLP_LINE64 line{};
+            line.SizeOfStruct = sizeof(line);
+            DWORD lineDisplacement = 0;
+            const bool haveSymbol = SymFromAddr(process, address, &displacement, symbol) != FALSE;
+            const bool haveLine = SymGetLineFromAddr64(process, address, &lineDisplacement, &line) != FALSE;
+            std::fprintf(stderr, "[crash]   #%u %s+0x%llx %s:%lu\n", static_cast<unsigned>(i), haveSymbol ? symbol->Name : "?",
+                         static_cast<unsigned long long>(displacement), haveLine ? line.FileName : "", haveLine ? line.LineNumber : 0ul);
+        }
+        std::fflush(stderr);
+    }
+
+    void installCrashReporter()
+    {
+        std::set_terminate([]()
+                           {
+                               std::fprintf(stderr, "[crash] std::terminate on thread %lu\n", GetCurrentThreadId());
+                               if (const std::exception_ptr ep = std::current_exception())
+                               {
+                                   try
+                                   {
+                                       std::rethrow_exception(ep);
+                                   }
+                                   catch (const std::exception &e)
+                                   {
+                                       std::fprintf(stderr, "[crash] exception: %s\n", e.what());
+                                   }
+                                   catch (...)
+                                   {
+                                       std::fprintf(stderr, "[crash] non-std exception\n");
+                                   }
+                               }
+                               printStackTrace();
+                               std::_Exit(3); });
+        std::signal(SIGABRT, [](int)
+                    {
+                        std::fprintf(stderr, "[crash] abort on thread %lu\n", GetCurrentThreadId());
+                        printStackTrace();
+                        std::_Exit(3); });
+    }
+#endif
+
     void printUsage()
     {
         std::cout << "usage: sotc [--iso <path-to-" << sotc::generated::kSerial << ".iso>]\n"
@@ -52,6 +113,9 @@ namespace
 
 int main(int argc, char *argv[])
 {
+#if defined(_WIN32)
+    installCrashReporter();
+#endif
     sotc::log::configureFromEnvironment();
     std::filesystem::path iso;
     for (int i = 1; i < argc; ++i)

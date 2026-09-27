@@ -81,8 +81,7 @@ namespace sotc::hle
             const uint64_t ticks = 1 + (static_cast<uint64_t>(result) * kFieldsPerSecond + rate - 1) / rate;
             SOTC_TRACE(File, "sceRead(fd=" << fd << ") -> " << result << " bytes, blocking " << ticks << " vsync(s)");
             EeScheduler &scheduler = runtime->eeScheduler();
-            scheduler.waitVSync(scheduler.currentVSyncTick() + ticks - 1, result, [resumePc](R5900Context &context)
-                                { context.pc = resumePc; });
+            scheduler.waitVSyncResume(scheduler.currentVSyncTick() + ticks - 1, result, resumePc);
         }
 
         uint64_t envFields(const char *name, uint64_t fallback)
@@ -99,8 +98,7 @@ namespace sotc::hle
                 return;
             }
             EeScheduler &scheduler = runtime->eeScheduler();
-            scheduler.waitVSync(scheduler.currentVSyncTick() + fields - 1, result, [resumePc](R5900Context &context)
-                                { context.pc = resumePc; });
+            scheduler.waitVSyncResume(scheduler.currentVSyncTick() + fields - 1, result, resumePc);
         }
 
         void blockCallerOneField(R5900Context *ctx, PS2Runtime *runtime, uint32_t resumePc)

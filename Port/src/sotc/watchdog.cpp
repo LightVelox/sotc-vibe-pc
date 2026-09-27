@@ -289,6 +289,11 @@ namespace sotc::watchdog
                             message << "    sema " << sema.id << " count=" << sema.count << "/" << sema.maxCount << " waiters=" << sema.waiters << '\n';
                         }
                     }
+                    for (const std::string &line : g_runtime->iopDebugSnapshot().diagnostics)
+                    {
+                        if (line.rfind("iop ", 0) == 0)
+                            message << "    " << line << '\n';
+                    }
                 }
                 message << "GameThread native stack:";
                 for (const auto &frame : frames)

@@ -3,6 +3,7 @@
 #include "sotc/log.h"
 #include "ps2_stubs.h"
 #include "runtime/ee_scheduler.h"
+#include "runtime/ps2_save_state.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -111,8 +112,7 @@ namespace sotc::hle
                 g_drive.pending = false;
                 target = g_drive.busyUntilCycle;
             }
-            scheduler.waitUntilCycle(target, 0, [resumePc](R5900Context &context)
-                                     { context.pc = resumePc; });
+            scheduler.waitUntilCycleResume(target, 0, resumePc);
         }
 
         struct Binding
@@ -138,6 +138,18 @@ namespace sotc::hle
     void installSceCdvd(PS2Runtime &runtime)
     {
         (void)runtime;
+        ps2x::savestate::registerExtension(
+            "sotc.cdvd",
+            [](ps2x::state::Writer &out)
+            {
+                std::lock_guard<std::mutex> lock(g_drive.mutex);
+                ps2x::state::fields(out, g_drive.busyUntilCycle, g_drive.pending, g_drive.nextSequentialLsn, g_drive.reads);
+            },
+            [](ps2x::state::Reader &in)
+            {
+                std::lock_guard<std::mutex> lock(g_drive.mutex);
+                ps2x::state::fields(in, g_drive.busyUntilCycle, g_drive.pending, g_drive.nextSequentialLsn, g_drive.reads);
+            });
         for (const auto &binding : kBindings)
         {
             if (!FunctionHooks::instance().replace(binding.address, binding.name, binding.function, ReplacementStatus::Hle, binding.reason))

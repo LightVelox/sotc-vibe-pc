@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints appear as in PCSX2). Target: SCES-53326 v1.00
+Last updated: 2026-09-27 (sixteenth session: save states with F5/F9, SIO2 memory-card device). Target: SCES-53326 v1.00
 (see `GAME_BUILD.md`).
 
 ## Working
@@ -42,6 +42,26 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
     overrides, `ps2_host_input::setRightStickInvertDefault`). Only gamepad and keyboard input is flipped; pad scripts
     are not, so scripted runs stay comparable with PCSX2. The game's own options (`0x14770BC`/`0x14770C0` free-camera
     reverse LR/UD, `0x14770B0`/`0x14770B4` aiming) are 0 without a memory card.
+* **Save states (sixteenth session)**: F5 quick-saves and F9 quick-loads (`<exe dir>/states/quick.state`,
+  ~46 MB, uncompressed); a short overlay confirms. The state is taken at the top of the EE scheduler loop,
+  where every guest thread is parked at a resume point: requests wait (a few dispatches) until no interrupt/
+  alarm/callback handler is running and no thread holds a host completion closure, then the VU/GIF threads are
+  drained. Contents: EE RAM, scratchpad, IOP RAM mirror, GS privileged registers, VIF/DMA/timer/TLB state,
+  VU0/VU1 micro and data memory, both VU interpreters (pipelines, flags, cycle), the VU1 timing model, GS
+  frontend registers + VRAM (backend `SnapshotVram`/`ImportState`; the GPU backend re-uploads on load), the
+  scheduler (threads, waits, semaphores, event flags, alarms, IRQ handlers, deadlines with host time rebased,
+  VBlank period), the IOP emulator (memory, kernel, RPC, CDVD, timers, intrman, SIO2 incl. pad, SPU2, imports,
+  module manager), VFS descriptors (reopened by path and seeked), the HLE CD/SIF stub state and the syscall
+  layer's SIF RPC client/server and module tables, plus registered extensions (Port: the DVD drive model).
+  Waits that used lambdas to set the resume PC now use `EeResume` descriptors (`waitVSyncResume`,
+  `waitUntilCycleResume`) so they survive a save. Serialization is one bidirectional `serialize(Ar&)` per
+  class (`ps2x/state_io.h`, section tags checked on load). Validation (`Tools/state_check.py`, deterministic
+  mode): save at field 1000, load in a fresh process at field 300 or at field 1, or reload in the same process
+  at field 1200 — the cutscene window 1360-1365 is identical in all cases (checkpoints and 58,922 per-command
+  VRAM hashes). In the default MTVU + GPU configuration a gameplay state (Wander riding to the shrine, field
+  3000) loads in a fresh process and renders the same frame 100 fields later; frame differences stay within
+  the normal run-to-run noise of that (non-deterministic) mode. Test hooks: `PS2X_STATE_SAVE_AT=field:path`,
+  `PS2X_STATE_LOAD_AT=field:path`. Memory-card contents are not part of a state (as in emulators).
 * **Language menu renders correctly** (content matches a PCSX2 GS dump draw for draw): green
   background, five labels with drop shadow, cursor. Fixed on the way: VIF1 `DIRECT` IMAGE continuation
   (the font/CLUT uploads were corrupted and swallowed the following packets) and exact depth for
@@ -615,7 +635,7 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
 | Gameplay speed | The shrine runs at 48-49.5 fields/s; VU thread 87-91% busy and EE thread ~95% busy (the GPU renderer is no longer the limit) | VU1 codegen (the paired raw/normalized VF locals spill heavily; per-FMAC safety check), XGKICK sync on every VU store, EE-side HLE of hot library routines |
 | Emulation speed | Opening cutscene: clouds 50, canyon ~49, riders ~50, forest ~49, towers ~42, passage ~41; the towers/passage are VU-thread bound (~21-22 ms of VU work per field); 60-70% of VU1 work in one microprogram (image 2048debd entry 0x05B0) | more AOT codegen work measured with `sotc_vu1_bench` |
 | Audio | `IopSpu2` models voice playback (addresses, loop flags, ENDX, ADSR, DMA/PIO into SPU2 RAM) but produces no samples | ADPCM decode + volume/pitch modulation/noise + reverb per core, mixed to a host audio backend fed at 48 kHz from the IOP cycle clock; SPU2 IRQ address |
-| Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
+| Memory card | Sixteenth session: `VirtualMemoryCard` on SIO2 port 2 (PCSX2 protocol: probe, specs, sector set, read/write data, erase, terminator, auth commands; raw 8 MB `.ps2` image with ECC area, created blank at `<exe dir>/memcards/Mcd001.ps2`, PCSX2 cards are compatible), `SecrAuthCard` and `sceCdReadClock` HLE on the IOP. Opt-in with `PS2X_MEMCARD=1` because the game then stalls: SIO2D/MC2_D detect and authenticate the card (F3, 28, 27, BF, then a 28 poll every few frames), but the game's first card request (DBCMAN socket server `0x8000131c`, 8,336-byte nowait RPC with end callback) never turns into card traffic and the EE waits forever (black screen after loading) | follow the request inside DBCMAN (socket queue, driver callbacks registered by MC2_D via dbcman #4-9) and why MC2_D's port thread never picks it up; `PS2X_MC_TRACE=1` logs every card frame, `PS2X_RPC_LOG=1` every SIF RPC, `SOTC_WATCHDOG_THREADS=1` now also prints IOP threads |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
 | FMV | FFmpeg disabled | decide decoder strategy |
 | EE cycle accounting | 8 EE cycles per recompiled-function dispatch, 32 per loop back-edge, 0 per syscall; the PS2 kernel spends ~45-250 instructions per syscall | no longer a speed problem (the idle thread is skipped); charge syscall costs only if a timing difference shows up |
@@ -731,7 +751,7 @@ No game function is stubbed with placeholder return values.
    against PCSX2) and needs new golden recordings.
 3. VU0 registers other than R are per context (each thread/handler has its own copy); on the PS2 they are
    shared. Sharing them all needs thread switches only where the PS2 makes them (see the haze note).
-4. Memory card on SIO2 ports 2/3 (also needed to keep in-game options such as the camera axes).
+4. Memory card: the SIO2 device exists (opt-in, see Known blockers); finish the DBCMAN -> MC2_D request path so the game reads and formats the card (also needed to keep in-game options such as the camera axes).
 5. Audio: mixer and host output on top of `IopSpu2` (the voice model is there).
 6. Sub-field timed waits in the scheduler; calibrate disc timing against PCSX2; IOP VBlank at the PAL rate.
 7. argv, kernel object ID numbering.

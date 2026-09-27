@@ -1,5 +1,6 @@
 #include "runtime/ps2_async_vif.h"
 #include "runtime/ps2_input_options.h"
+#include "runtime/ps2_save_state.h"
 #include "ps2_runtime.h"
 #include "runtime/gs/gs_threaded_backend.h"
 #include "runtime/gs/gs_gpu_backend.h"
@@ -176,6 +177,7 @@ int main(int argc, char *argv[])
     paths.cdImage = std::filesystem::absolute(iso);
     std::error_code error;
     std::filesystem::create_directories(paths.mcRoot, error);
+    ps2x::savestate::setQuickSlotPath(exeDir / "states" / "quick.state");
 
     GSThreadedBackend::SetEnabledByDefault(true);
     GSThreadedBackend::SetGpuByDefault(true);

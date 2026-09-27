@@ -552,9 +552,48 @@ namespace sotc::watchdog
         std::fclose(out);
     }
 
+    void pokeLoop(std::string spec)
+    {
+        struct Poke
+        {
+            uint64_t field = 0;
+            uint32_t address = 0;
+            uint32_t value = 0;
+        };
+        std::vector<Poke> pokes;
+        std::stringstream list(spec);
+        std::string item;
+        while (std::getline(list, item, ';'))
+        {
+            std::stringstream fields(item);
+            std::string field, address, value;
+            if (std::getline(fields, field, ':') && std::getline(fields, address, ':') && std::getline(fields, value, ':'))
+                pokes.push_back({std::stoull(field), static_cast<uint32_t>(std::stoul(address, nullptr, 16)),
+                                 static_cast<uint32_t>(std::stoul(value, nullptr, 16))});
+        }
+        std::sort(pokes.begin(), pokes.end(), [](const Poke &a, const Poke &b) { return a.field < b.field; });
+        uint8_t *rdram = g_runtime->memory().getRDRAM();
+        size_t next = 0;
+        while (next < pokes.size())
+        {
+            const uint64_t tick = g_runtime->memory().gs().vsyncTick.load();
+            while (next < pokes.size() && pokes[next].field <= tick)
+            {
+                std::memcpy(rdram + (pokes[next].address & 0x1FFFFFFCu), &pokes[next].value, sizeof(uint32_t));
+                SOTC_INFO(Boot, "poke field " << tick << " [0x" << std::hex << pokes[next].address << "] = 0x" << pokes[next].value);
+                ++next;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+    }
+
     void startFromEnvironment(PS2Runtime *runtime)
     {
         g_runtime = runtime;
+        if (const char *pokes = std::getenv("SOTC_POKE"))
+        {
+            std::thread(pokeLoop, std::string(pokes)).detach();
+        }
 #if defined(_WIN32)
         if (const char *watches = std::getenv("SOTC_WATCH_WRITE"))
         {

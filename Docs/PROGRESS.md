@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-27 (sixteenth session: save states with F5/F9, SIO2 memory-card device). Target: SCES-53326 v1.00
+Last updated: 2026-09-27 (seventeenth session: memory-card format, save and load). Target: SCES-53326 v1.00
 (see `GAME_BUILD.md`).
 
 ## Working
@@ -9,7 +9,7 @@ Last updated: 2026-09-27 (sixteenth session: save states with F5/F9, SIO2 memory
   match confirmed via PCSX2's bundled database. Tooling and the executable refuse other builds.
 * **XFF module format** reverse-engineered (`Docs/XFF_FORMAT.md`); static relocation of KERNEL,
   MANAGER and GAMECORE is byte-identical to PCSX2 except at import sites re-patched at run time.
-* **Static recompilation** of the boot ELF + all three modules (9,201 functions, 0 decode failures,
+* **Static recompilation** of the boot ELF + all three modules (9,216 functions, 0 decode failures,
   0 unhandled instructions). 26,981 run-time relocation sites read their immediates from guest RAM;
   constant propagation never folds values produced by those sites (`Tools/verify_reloc_sites.py`).
 * **Native boot through the original loader**: the recompiled boot ELF loads, relocates and enters
@@ -19,6 +19,16 @@ Last updated: 2026-09-27 (sixteenth session: save states with F5/F9, SIO2 memory
 * **IOP**: the game's IOP modules (SIO2MAN, DBCMAN, SIO2D, DS1O_D, LIBSD, `sg2iop_driver`, MC2_D) load
   from the disc image and EE buffers and execute on the runtime's IOP emulator; the sound driver's RPC
   server comes up. SPU2 has a voice model on the IOP side (see "Tutorial hints"), no audio output yet.
+* **Memory card (seventeenth session)**: enabled by default (`PS2X_MEMCARD=0` disables it); the game's card driver now completes its
+  DBCMAN/MC2_D requests, reads a blank card, offers to format it, formats it, and writes a shrine save.
+  A fresh game launch lists the saved "Shrine of Worship" entry under Load Game and restores Wander to
+  gameplay at the shrine. The raw `memcards/Mcd001.ps2` image remains 8,650,752 bytes (16,384 pages of
+  528 bytes); PCSX2 identified a copy of the formatted, saved image as "8 MB, Formatted", listed its
+  shrine save under Load Game, and loaded it into gameplay at the shrine. Loading a PCSX2-created save
+  in the port remains to be checked.
+  The five no-card GS goldens compare SAME with `PS2X_MEMCARD=0`,
+  `ps2x_tests` passes 477/477, IOP CTest passes 6/6, and the save-state round trip compares SAME.
+  The scripted shrine-save test uses the opt-in `SOTC_POKE` diagnostic to request gameflow state 5.
 * **Disc**: ISO-backed `cdrom0:` (VFS, IOP loader, `sceCdSearchFile` with real LBNs, raw sector reads);
   `NICO.DAT` boot data and root segment load; the sheet system links its data and re-patches code.
 * **Timing model for HLE'd I/O**: disc opens/stat/search/reads block the calling guest thread for a
@@ -635,7 +645,6 @@ Last updated: 2026-09-27 (sixteenth session: save states with F5/F9, SIO2 memory
 | Gameplay speed | The shrine runs at 48-49.5 fields/s; VU thread 87-91% busy and EE thread ~95% busy (the GPU renderer is no longer the limit) | VU1 codegen (the paired raw/normalized VF locals spill heavily; per-FMAC safety check), XGKICK sync on every VU store, EE-side HLE of hot library routines |
 | Emulation speed | Opening cutscene: clouds 50, canyon ~49, riders ~50, forest ~49, towers ~42, passage ~41; the towers/passage are VU-thread bound (~21-22 ms of VU work per field); 60-70% of VU1 work in one microprogram (image 2048debd entry 0x05B0) | more AOT codegen work measured with `sotc_vu1_bench` |
 | Audio | `IopSpu2` models voice playback (addresses, loop flags, ENDX, ADSR, DMA/PIO into SPU2 RAM) but produces no samples | ADPCM decode + volume/pitch modulation/noise + reverb per core, mixed to a host audio backend fed at 48 kHz from the IOP cycle clock; SPU2 IRQ address |
-| Memory card | Sixteenth session: `VirtualMemoryCard` on SIO2 port 2 (PCSX2 protocol: probe, specs, sector set, read/write data, erase, terminator, auth commands; raw 8 MB `.ps2` image with ECC area, created blank at `<exe dir>/memcards/Mcd001.ps2`, PCSX2 cards are compatible), `SecrAuthCard` and `sceCdReadClock` HLE on the IOP. Opt-in with `PS2X_MEMCARD=1` because the game then stalls: SIO2D/MC2_D detect and authenticate the card (F3, 28, 27, BF, then a 28 poll every few frames), but the game's first card request (DBCMAN socket server `0x8000131c`, 8,336-byte nowait RPC with end callback) never turns into card traffic and the EE waits forever (black screen after loading) | follow the request inside DBCMAN (socket queue, driver callbacks registered by MC2_D via dbcman #4-9) and why MC2_D's port thread never picks it up; `PS2X_MC_TRACE=1` logs every card frame, `PS2X_RPC_LOG=1` every SIF RPC, `SOTC_WATCHDOG_THREADS=1` now also prints IOP threads |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
 | FMV | FFmpeg disabled | decide decoder strategy |
 | EE cycle accounting | 8 EE cycles per recompiled-function dispatch, 32 per loop back-edge, 0 per syscall; the PS2 kernel spends ~45-250 instructions per syscall | no longer a speed problem (the idle thread is skipped); charge syscall costs only if a timing difference shows up |
@@ -751,7 +760,7 @@ No game function is stubbed with placeholder return values.
    against PCSX2) and needs new golden recordings.
 3. VU0 registers other than R are per context (each thread/handler has its own copy); on the PS2 they are
    shared. Sharing them all needs thread switches only where the PS2 makes them (see the haze note).
-4. Memory card: the SIO2 device exists (opt-in, see Known blockers); finish the DBCMAN -> MC2_D request path so the game reads and formats the card (also needed to keep in-game options such as the camera axes).
+4. Memory card: verify the port can load a PCSX2-created save.
 5. Audio: mixer and host output on top of `IopSpu2` (the voice model is there).
 6. Sub-field timed waits in the scheduler; calibrate disc timing against PCSX2; IOP VBlank at the PAL rate.
 7. argv, kernel object ID numbering.

@@ -16,6 +16,10 @@ from xff import (Linker, XffModule, R_MIPS_26, R_MIPS_32, R_MIPS_HI16, R_MIPS_LO
 
 NOP = 0
 JR_RA = 0x03E00008
+BOOT_EXTRA_ENTRIES = {
+    0x001198DC: "sub_001198DC",
+    0x0011F420: "_sceMcCoreRpcEnd",
+}
 
 
 def sha256(data):
@@ -206,6 +210,8 @@ def discover_boot(elf, secs, kernel, entry):
     region = CodeRegion("BOOT", ".text", text["addr"], elf[text["offset"]:text["offset"] + text["size"]])
     d = Discovery(region)
     d.add(entry, f"sub_{entry:08X}", "elf-entry", "high")
+    for address, name in BOOT_EXTRA_ENTRIES.items():
+        d.add(address, name, "manual", "high")
     for s in kernel.symbols:
         if s.shndx == SHN_ABS and s.name and region.contains(s.value):
             if s.type == STT_FUNC:

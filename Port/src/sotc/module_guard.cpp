@@ -186,11 +186,60 @@ namespace sotc
         });
     }
 
+    void installMemoryTracesFromEnvironment()
+    {
+        const char *value = std::getenv("SOTC_TRACE_MEM");
+        if (!value)
+        {
+            return;
+        }
+        std::stringstream all(value);
+        std::string spec;
+        while (std::getline(all, spec, ';'))
+        {
+            std::stringstream fields(spec);
+            std::string part;
+            std::vector<uint32_t> numbers;
+            while (std::getline(fields, part, ':'))
+            {
+                numbers.push_back(static_cast<uint32_t>(std::stoul(part, nullptr, 16)));
+            }
+            if (numbers.size() < 3)
+            {
+                SOTC_ERROR(Boot, "SOTC_TRACE_MEM must be <function>:<address>:<length>[:<a0>];...");
+                continue;
+            }
+            const uint32_t function = numbers[0];
+            const uint32_t address = numbers[1];
+            const uint32_t length = std::min<uint32_t>(numbers[2], 0x400u);
+            const bool filtered = numbers.size() > 3;
+            const uint32_t a0 = filtered ? numbers[3] : 0u;
+            FunctionHooks::instance().observeEntry(function, "tracemem_" + spec, [function, address, length, filtered, a0](uint8_t *rdram, R5900Context *ctx, PS2Runtime *) {
+                if (filtered && getRegU32(ctx, 4) != a0)
+                {
+                    return;
+                }
+                std::ostringstream line;
+                line << "mem at 0x" << std::hex << function << " ra=0x" << getRegU32(ctx, 31) << " [0x" << address << "]";
+                for (uint32_t i = 0; i < length; ++i)
+                {
+                    if ((i & 15u) == 0u)
+                    {
+                        line << "\n    +" << std::setw(3) << std::setfill('0') << i << ":";
+                    }
+                    line << ' ' << std::setw(2) << std::setfill('0') << static_cast<uint32_t>(rdram[(address + i) & PS2_RAM_MASK]);
+                }
+                SOTC_INFO(Ee, line.str());
+            });
+        }
+    }
+
     void installCallTracesFromEnvironment(PS2Runtime &runtime)
     {
         (void)runtime;
         installRamDumpFromEnvironment();
         installThreadTraceFromEnvironment();
+        installMemoryTracesFromEnvironment();
         const char *value = std::getenv("SOTC_TRACE_CALLS");
         if (!value)
         {

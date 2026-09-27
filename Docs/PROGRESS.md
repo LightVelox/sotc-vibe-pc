@@ -33,6 +33,15 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
   the language-menu cursor and Cross leaves the menu. Keyboard: arrows = D-pad, WASD / IJKL = left / right
   stick, X or Space = Cross, C or Backspace = Circle, Z = Square, V = Triangle, Q/E = L1/R1,
   Left/Right Shift = L2/R2, Enter = Start, Tab = Select, F/G = L3/R3; gamepad 0/1 map to ports 0/1.
+  * Stick center is 0x7F (fifteenth session), as in PCSX2 (read from the game's pad buffer `0x12914B4` over PINE:
+    `7f7f7f7f` at rest). The game reads raw stick bytes somewhere (not only through the 0.4 dead zone of
+    `iosPadGetXZInputL/R`): with 0x80 at rest a scripted run diverged from PCSX2 before the first ride (Agro arrived at a
+    different spot) and the user saw Agro drift right; with 0x7F the same script matches PCSX2 at fields 2550-2600.
+    Gamepad axes map -1..1 to 0x00..0xFF around 0x7F.
+  * Right stick inverted on both axes by default in this port (user request; `PS2X_INVERT_RIGHT_STICK=0|x|y|xy`
+    overrides, `ps2_host_input::setRightStickInvertDefault`). Only gamepad and keyboard input is flipped; pad scripts
+    are not, so scripted runs stay comparable with PCSX2. The game's own options (`0x14770BC`/`0x14770C0` free-camera
+    reverse LR/UD, `0x14770B0`/`0x14770B4` aiming) are 0 without a memory card.
 * **Language menu renders correctly** (content matches a PCSX2 GS dump draw for draw): green
   background, five labels with drop shadow, cursor. Fixed on the way: VIF1 `DIRECT` IMAGE continuation
   (the font/CLUT uploads were corrupted and swallowed the following packets) and exact depth for
@@ -190,6 +199,15 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
     result is the normalized ACC). Generated images are split into ~400 KB parts (`vu1_<hash>_<n>.cpp`) so the ~99
     files build in parallel. Tried and dropped: keeping registers in locals across a whole block (MSVC codegen got
     2.4-4.5x slower).
+  * Register states in segments (fifteenth session): each VF register kept a raw and a normalized local for the whole
+    segment and MSVC spilled heavily. `vu1_recomp` now tracks per register whether raw == normalized ("clean": every
+    FMAC result, MINI/MAX, ITOF, moves of clean registers) and then keeps only the normalized local; loads (LQ/LQI/LQD,
+    MFIR, MFP, MR32/MOVE of unclean sources) store their raw bits to `vu.m_state.vf` right away and keep only the
+    normalized local ("raw stored"; raw reads reload from memory). The segment write-back stores accordingly. Two
+    emitter details matter for this state: the upper op's write is generated before the lower op (emission order), and
+    `heavy()` probes `upperEmit`/`lowerEmit` under a `RegViewProbe` that restores the view. `sotc_vu1_bench --verify`
+    0 mismatches on the shrine/towers/passage traces; 7-10% less VU1 time. Tried and dropped: skipping the XGKICK
+    catch-up for VU stores outside the kick's read window (slower).
   * VU1 trace bench (fourteenth session): `PS2X_VU1_TRACE=<dir>/trace.bin:<firstField>:<fields>` records every VU1
     run (VU state + diffed VU memory, code images next to it); `build/port/bin/sotc_vu1_bench <trace> <dir>
     [--repeat N] [--verify] [--profile] [--only <pc>]` replays it through the compiled code (ms and VU cycles per
@@ -202,7 +220,10 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
     `iosDmaSendPath1` polls D1_CHCR/VIF1_STAT/VPU_STAT before every send, so the EE waits like on a PS2 and
     overloaded shots draw every other field (towers ~50%, passage ~80% of frames 0.0392 s) at real-time speed.
     `PS2X_VU1_TIMING=0` disables it, a fraction scales it. The cutscene golden was re-recorded for it (SAME with the
-    model off).
+    model off). Fifteenth session: the D1_CHCR read no longer waits for the VU thread (that wait was 13% of the EE
+    thread): the worker publishes the VU1 cycle counter after each job and the read charges the cycles completed so far;
+    the rest is charged at later reads. `PS2X_VU1_TIMING_SYNC=1` restores the blocking accounting. DMA data is copied
+    at enqueue time, so the EE never needed the wait for correctness. Canyon/riders 40 -> 46.5 fields/s.
 * **GPU GS renderer (eighth session, default)**: `GSGpuBackend` (OpenGL 4.6 compute on the GS worker thread,
   own WGL context and loader) keeps the 4 MB of GS memory in an SSBO with the swizzle tables and ports the
   reference rasterizer to GLSL. Primitives are binned into 16x16 tiles, one workgroup per tile draws them in
@@ -213,6 +234,28 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
   logo/menu differ by the CPU path's round-toward-zero stripes. `PS2X_GS_GPU=0/1` overrides the default,
   `PS2X_GS_GPU_STATS=1` prints presents/s, GPU time and batches/CLUT loads/transfers per frame;
   `gs_replay --backend gpu|gputhread` and `--compare-backends A B [--dump dir]` replay recordings on it.
+  * Fifteenth session (output identical to before on the shrine and New Game intro recordings, `--compare-backends cpu
+    gpu` statistics unchanged): shrine replay 0.332 -> 0.217 s per 10 fields, intro 2.01 -> 1.10 s per 70 fields.
+    * Copy-on-write texture pages: an upload into pages that queued primitives (or queued CLUT loads) still read no longer
+      flushes the batch. The old page contents are copied into a shadow area (512 pages after the 4 MB of GS memory) and
+      the queued readers are redirected through per-epoch page maps (`SEpoch` state word, `pageMap` SSBO, remap in the
+      texture fetch and in the CLUT load shader). Only uploads over pages the batch renders to still flush. The main scene
+      went from ~68 raster dispatches per field to ~2. CLUT slots are now counted per batch (a batch can span more than
+      1,024 CLUT loads once uploads stop splitting it).
+    * Uploads and page copies are queued and run as one copy dispatch plus one upload dispatch (descriptor list + per
+      workgroup map) at the next flush or conflict; CLUT loads run once per batch (1,400 -> 90 CLUT dispatches per 10
+      shrine fields). The game streams every palette (8x2 at 0x3fXX) and 4-bit texture (64x64 at 0x2fXX) through the same
+      small areas, so a write-after-write on a pending page still starts a new transfer phase (~350 small dispatches per
+      10 fields remain; each dependent dispatch costs ~15 us of GPU time regardless of barrier bits).
+    * Raster loop: per 32-primitive chunk each pixel first builds a coverage bitmask, then shades only the primitives
+      covering it, in order (bit-exact by construction). The critical path of a hot tile (Mono's hair: ~800 tiny
+      triangles in one 16x16 tile) is now the per-pixel overdraw instead of every primitive in the tile.
+    * Exact triangle/tile binning on the CPU (tiles whose pixel centers all fail an edge are not binned): shadow-volume
+      pass 1.27M -> 0.42M (tile, primitive) pairs per 10 fields, 26 -> 18 ms.
+    * `PS2X_GS_GPU_PROF=1` prints GPU timestamps per dispatch kind, the slowest dispatches with their batch shape, time
+      per render target, flush reasons and upload hazards. Measured and not worth it: swizzle tables in shared memory
+      (lookups are ~5% of the main scene), SSBO-only barriers.
+    * All of it ran in-game (shrine, New Game intro 3600-3900 where 8x8 tiles had hung the driver) without a stall.
 * **VU1 and GIF on their own threads (MTVU, eighth session, default)**: `ps2x::asyncvif` runs VIF1 and GIF PATH3
   jobs in order on a "VUThread" and GIF packets on a "GIFThread" (chunks of 256 KB). The EE waits for both
   only when it touches VIF1/GIF registers, VU1 memory or GS privileged registers. DMA completion stays
@@ -430,6 +473,19 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
 
 ## Partially working
 
+* Speed after the fifteenth session (fields/s, same machine, start of session in brackets): shrine gameplay 48-49.5
+  (32), clouds 50 (50), canyon 49.3 (40), riders 49.7 (37.5), forest/ruins 48.7 (39), towers 41.7 (39), passage 41.2
+  (40). The shrine is no longer GPU bound (the GS thread never waits for the GPU; it is idle ~55% of the time). Limits
+  now: the VU thread (87-91% busy, ~18 ms of VU work per field in the shrine, ~21-22 ms in the towers/passage) and the
+  EE thread (~95% busy in the shrine). DMA chain buffers are now recycled through the async VIF spare pool (each VIF1/GIF
+  chain transfer allocated a fresh buffer of the largest size seen and the VU thread freed it). EE-side changes: `__floatdisf` HLE (`Port/src/sotc/hle/libgcc.cpp`: libgcc's
+  soft-double int64->float routine was 4.6% of the EE thread; the native version truncates like the guest routine,
+  0 mismatches over 1M calls with `SOTC_VERIFY_LIBGCC=1`, and charges 1,416 EE cycles), IOP batch 128 -> 1,024 IOP
+  cycles (the IOP bookkeeping was ~4% of the EE thread), the branch-trace switch read without a thread-safe static
+  guard on every call. VU side: `resetScheduler` clears its pipelines with `memset` (~3% of VU1 time). The cutscene
+  golden was re-recorded after the HLE (EE cycle accounting shifts a cloud animation by a fraction; at most 2 pixels
+  differ by more than 8 per field); the other four goldens are unchanged. `ps2x_tests` 477 (the "SifInitRpc does not
+  reset the running IOP" test now advances 16,384 EE cycles, past one IOP step), IOP ctest 6/6.
 * Speed after the fourteenth session (fields/s, MTVU + GPU renderer, RTX 3060 / Ryzen 5 5500; baseline at the start
   of the session in brackets): clouds 49.5 (42.6), canyon 40 (27.9), riders 37.5 (27.5), forest/ruins 39 (32.8),
   towers 39 (17.1), passage 39.6 (15.8); shrine gameplay ~32 (25-30). Measured with the VU1 timing model and the
@@ -556,8 +612,8 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
 
 | Area | Blocker | Plan |
 |---|---|---|
-| Gameplay speed | The shrine runs at ~32 fields/s (the game draws at 25 FPS there, one frame per 2 fields); the VU thread is only ~63% busy: the GPU GS renderer needs ~70 ms of GPU per frame (see Partially working) | fewer raster dispatches (early CLUT dispatch on palette uploads, copy-on-write texture pages), cheaper shadow-volume pass; any shader change must be tested in-game (8x8 tiles hung the driver) |
-| Emulation speed | Opening cutscene: clouds ~50, canyon ~40, riders ~37, forest ~39, towers ~39, passage ~40; VU-thread bound (~80% busy), 60-70% of VU1 work in one microprogram (image 2048debd entry 0x05B0) | more AOT codegen work measured with `sotc_vu1_bench` (per-FMAC safety check, per-MSCAL fixed cost ~260 ns, VIF unpack) |
+| Gameplay speed | The shrine runs at 48-49.5 fields/s; VU thread 87-91% busy and EE thread ~95% busy (the GPU renderer is no longer the limit) | VU1 codegen (the paired raw/normalized VF locals spill heavily; per-FMAC safety check), XGKICK sync on every VU store, EE-side HLE of hot library routines |
+| Emulation speed | Opening cutscene: clouds 50, canyon ~49, riders ~50, forest ~49, towers ~42, passage ~41; the towers/passage are VU-thread bound (~21-22 ms of VU work per field); 60-70% of VU1 work in one microprogram (image 2048debd entry 0x05B0) | more AOT codegen work measured with `sotc_vu1_bench` |
 | Audio | `IopSpu2` models voice playback (addresses, loop flags, ENDX, ADSR, DMA/PIO into SPU2 RAM) but produces no samples | ADPCM decode + volume/pitch modulation/noise + reverb per core, mixed to a host audio backend fed at 48 kHz from the IOP cycle clock; SPU2 IRQ address |
 | Memory card | MC2_D now completes its SIO2 transfers, but ports 2/3 answer "no device"; the game shows "No memory card inserted" (Continue works) | memory-card device on SIO2 ports 2/3 (next to `VirtualDualShock2`), backed by a host file; compare the post-language-menu screens with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
@@ -575,7 +631,8 @@ Last updated: 2026-09-26 (thirteenth session: SPU2 voice model, tutorial hints a
 | SCE fio calls without a VFS equivalent return SCE error codes | `Port/src/sotc/hle/sce_fileio.cpp` | no IOP FILEIO server; each call is logged | implement if the game uses them |
 | SIO2 transfer latency: 1,000 + 1,200 IOP cycles per byte; SIF DMA completion 64 cycles + 1 per 4 bytes | `ps2xIOP/src/emulator/devices/iop_sio2.cpp`, `iop_emulator.cpp` | order of magnitude of a 250 kHz pad link | calibrate against PCSX2 if pad latency matters |
 | IOP VBlank runs at NTSC 59.94 Hz while the game is PAL | `ps2xIOP/src/emulator/iop_emulator_const.h` | pre-existing; DS1O_D polls the pad per IOP VBlank | make the IOP VBlank follow the GS video mode like the EE side |
-| IOP runs in batches of 128 IOP cycles (1,024 EE cycles) | `ps2xIOP/src/emulator/iop_emulator.cpp` (`kIopBatchCycles`) | stepping the IOP one cycle per dispatch cost ~25% of loading time | — (well below any observable latency) |
+| IOP runs in batches of 1,024 IOP cycles (8,192 EE cycles, 28 us) | `ps2xIOP/src/emulator/iop_emulator.cpp` (`kIopBatchCycles`) | stepping the IOP per dispatch cost ~25% of loading time; 128-cycle batches still cost ~4% of the EE thread in gameplay | — (well below any observable latency; goldens unchanged by the step from 128) |
+| `__floatdisf` (libgcc soft-double int64->float, `0x121D00`) runs natively | `Port/src/sotc/hle/libgcc.cpp` | 4.6% of the EE thread in gameplay | — (same results; `SOTC_VERIFY_LIBGCC=1` runs the guest routine and compares) |
 | Module load addresses in the profile are measured | `Port/profile/SCES-53326_v1.00.json` | only used offline for recompilation; verified at run time | — |
 
 No game function is stubbed with placeholder return values.
@@ -646,13 +703,19 @@ No game function is stubbed with placeholder return values.
 
 ## Next priorities
 
-1. Speed (target: paced 50 fields/s everywhere). Shrine gameplay is now GPU-renderer bound: cut the main scene's
-   raster dispatches (dispatch queued CLUT loads early instead of flushing on palette uploads, then copy-on-write
-   texture pages for streamed textures), make the shadow-volume pass cheaper, and reduce the GS thread's CPU work
-   (~37 ms per frame outside GPU waits); validate every shader change in-game, not only in `gs_replay`. The cutscene
-   is VU-thread bound (~80% busy): keep optimizing the AOT code with `sotc_vu1_bench` (FMAC safety checks, the
-   ~260 ns fixed cost per MSCAL, VIF unpack), cull the off-screen rider. Check the game's 60 Hz mode too (4.9M VU1
-   cycles per field). Then leave the shrine (light beam outdoors, the plains, the first colossus), capturing new VU1
+1. Speed (target: paced 50 fields/s everywhere). The shrine (48-49.5) and the cutscene (49-50, towers/passage ~41-42)
+   are VU-thread bound (87-91% busy) with the EE thread close behind (~95% in the shrine). VU side: the compiled
+   blocks still spill (MSVC); the per-FMAC safety check; the d18c8dfa image (second hottest, ~13% of the VU thread);
+   VIF unpack (~6%) and XGKICK packet handling (~5%). EE side: more HLE of hot libgcc/soft-float routines (check
+   the profile with `SOTC_PROFILE_THREAD=GameThread`), `EeScheduler::accountCycles` (~5%). GPU: ~350 small transfer
+   dispatches per 10 shrine fields remain (palette/texture streaming through fixed areas; would need write renaming).
+   Validate every shader change in-game, not only in `gs_replay`. Check the game's 60 Hz mode too (4.9M VU1 cycles
+   per field).
+   User reports to follow up (fifteenth session): the right-stick inversion and the stick-center fix (Agro drifting
+   right) need the user's confirmation; the first colossus shows elongated geometry around an otherwise fine body
+   (probably the fur; not reproduced yet: reaching it needs a ride plus a cliff climb; the game's
+   `gameflowSetPos`/`gameflowSetJumpSekiban` (save-stone jumps) might allow a scripted teleport; then a GS recording
+   and `PS2X_VU1_VERIFY=1` / new VU1 images captured with `PS2X_VU1_CAPTURE`). Then leave the shrine (light beam outdoors, the plains, the first colossus), capturing new VU1
    images (`PS2X_VU1_CAPTURE`) and regenerating `Port/generated/vu1`. Scripted events that wait for their music now
    progress (SPU2 voice model); watch for other events waiting on sound signals (`bgmScriptRecvSoundSignal`).
    The opening cutscene's remaining differences (tower-wall mist, far mist billboards, haze scroll) come from the

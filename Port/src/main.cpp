@@ -1,4 +1,5 @@
 #include "runtime/ps2_async_vif.h"
+#include "runtime/ps2_input_options.h"
 #include "ps2_runtime.h"
 #include "runtime/gs/gs_threaded_backend.h"
 #include "runtime/gs/gs_gpu_backend.h"
@@ -10,6 +11,7 @@
 #include "sotc/watchdog.h"
 #include "sotc/hle/sce_fileio.h"
 #include "sotc/hle/sce_cdvd.h"
+#include "sotc/hle/libgcc.h"
 #include "sotc_layout_generated.h"
 
 #if SOTC_HAS_VU1_PROGRAMS
@@ -179,6 +181,7 @@ int main(int argc, char *argv[])
     GSThreadedBackend::SetGpuByDefault(true);
     GSGpuBackend::SetAsyncPresentDefault(true);
     ps2x::asyncvif::setDefaultEnabled(true);
+    ps2_host_input::setRightStickInvertDefault(ps2_host_input::kInvertRightX | ps2_host_input::kInvertRightY);
 
     try
     {
@@ -205,6 +208,7 @@ int main(int argc, char *argv[])
         sotc::installModuleGuards(runtime);
         sotc::hle::installSceFileIo(runtime);
         sotc::hle::installSceCdvd(runtime);
+        sotc::hle::installLibgcc(runtime);
         sotc::installIdleThreadSkip(runtime);
 #if SOTC_HAS_VU1_PROGRAMS
         registerGeneratedVu1Programs();

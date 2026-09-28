@@ -10,6 +10,7 @@
 #include "sotc/idle_thread.h"
 #include "sotc/log.h"
 #include "sotc/module_guard.h"
+#include "sotc/window_icon.h"
 #include "sotc/watchdog.h"
 #include "sotc/hle/sce_fileio.h"
 #include "sotc/hle/sce_cdvd.h"
@@ -191,12 +192,25 @@ int main(int argc, char *argv[])
     try
     {
         PS2Runtime runtime;
-        const std::string title = std::string("Shadow of the Colossus (") + sotc::generated::kSerial + ") - native";
-        if (!runtime.initialize(title.c_str()))
+        if (!runtime.initialize("Shadow of the Colossus"))
         {
             SOTC_ERROR(Boot, "runtime initialization failed");
             return 1;
         }
+#if defined(_WIN32)
+        const HMODULE module = GetModuleHandleW(nullptr);
+        const HRSRC iconResource = FindResourceW(module, MAKEINTRESOURCEW(2), MAKEINTRESOURCEW(10));
+        if (iconResource)
+        {
+            const HGLOBAL iconData = LoadResource(module, iconResource);
+            const void *iconBytes = iconData ? LockResource(iconData) : nullptr;
+            if (iconBytes)
+            {
+                sotc::applyWindowIcon(static_cast<const unsigned char *>(iconBytes),
+                                      static_cast<int>(SizeofResource(module, iconResource)));
+            }
+        }
+#endif
         if (!runtime.loadELF(disc.bootElfPath.string()))
         {
             SOTC_ERROR(Boot, "failed to load " << disc.bootElfPath.string());

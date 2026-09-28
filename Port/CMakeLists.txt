@@ -20,6 +20,7 @@ set(SOTC_HOST_SOURCES
     src/sotc/log.cpp
     src/sotc/module_guard.cpp
     src/sotc/sha256.cpp
+    src/sotc/window_icon.cpp
     src/sotc/watchdog.cpp
 )
 
@@ -39,6 +40,11 @@ target_precompile_headers(sotc_game_code PRIVATE
 add_executable(sotc ${SOTC_HOST_SOURCES})
 target_include_directories(sotc PRIVATE src "${SOTC_GENERATED_DIR}")
 target_link_libraries(sotc PRIVATE sotc_game_code ps2_runtime)
+if(WIN32)
+    enable_language(RC)
+    target_sources(sotc PRIVATE assets/sotc.rc)
+    target_include_directories(sotc PRIVATE "${CMAKE_SOURCE_DIR}")
+endif()
 
 file(GLOB SOTC_VU1_SOURCES CONFIGURE_DEPENDS "${SOTC_GENERATED_DIR}/vu1/*.cpp")
 if(SOTC_VU1_SOURCES)

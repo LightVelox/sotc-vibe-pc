@@ -19,7 +19,8 @@ Last updated: 2026-09-27 (seventeenth session: memory-card format, save and load
 * **IOP**: the game's IOP modules (SIO2MAN, DBCMAN, SIO2D, DS1O_D, LIBSD, `sg2iop_driver`, MC2_D) load
   from the disc image and EE buffers and execute on the runtime's IOP emulator; the sound driver's RPC
   server comes up. SPU2 has a voice model on the IOP side (see "Tutorial hints"), no audio output yet.
-* **Memory card (seventeenth session)**: enabled by default (`PS2X_MEMCARD=0` disables it); the game's card driver now completes its
+* **Memory card (seventeenth session)**: enabled by default (`PS2X_MEMCARD=0` in `sotc.ini` disables it; see
+  `Docs/CONFIGURATION.md`); the game's card driver now completes its
   DBCMAN/MC2_D requests, reads a blank card, offers to format it, formats it, and writes a shrine save.
   A fresh game launch lists the saved "Shrine of Worship" entry under Load Game and restores Wander to
   gameplay at the shrine. The raw `memcards/Mcd001.ps2` image remains 8,650,752 bytes (16,384 pages of

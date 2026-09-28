@@ -5,6 +5,7 @@
 #include "runtime/gs/gs_threaded_backend.h"
 #include "runtime/gs/gs_gpu_backend.h"
 #include "sotc/function_hooks.h"
+#include "sotc/config.h"
 #include "sotc/game_disc.h"
 #include "sotc/idle_thread.h"
 #include "sotc/log.h"
@@ -110,6 +111,7 @@ namespace
     void printUsage()
     {
         std::cout << "usage: sotc [--iso <path-to-" << sotc::generated::kSerial << ".iso>]\n"
+                  << "settings: sotc.ini beside the executable (created on first launch)\n"
                   << "environment: SOTC_TRACE=BOOT,LOADER,FILE,EE,IOP,GS,VU,SPU2,INPUT,GAME,HOOK|ALL\n";
     }
 }
@@ -119,6 +121,8 @@ int main(int argc, char *argv[])
 #if defined(_WIN32)
     installCrashReporter();
 #endif
+    const std::filesystem::path exeDir = executableDirectory();
+    sotc::config::load(exeDir / "sotc.ini");
     sotc::log::configureFromEnvironment();
     std::filesystem::path iso;
     for (int i = 1; i < argc; ++i)
@@ -139,7 +143,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    const std::filesystem::path exeDir = executableDirectory();
     if (iso.empty())
     {
         if (const char *env = std::getenv("SOTC_ISO"))

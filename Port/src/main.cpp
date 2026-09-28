@@ -6,6 +6,7 @@
 #include "runtime/gs/gs_gpu_backend.h"
 #include "sotc/function_hooks.h"
 #include "sotc/config.h"
+#include "sotc/display_mode.h"
 #include "sotc/game_disc.h"
 #include "sotc/idle_thread.h"
 #include "sotc/log.h"
@@ -229,6 +230,7 @@ int main(int argc, char *argv[])
         sotc::hle::installSceCdvd(runtime);
         sotc::hle::installLibgcc(runtime);
         sotc::installIdleThreadSkip(runtime);
+        sotc::installDisplayMode(runtime);
 #if SOTC_HAS_VU1_PROGRAMS
         registerGeneratedVu1Programs();
 #endif

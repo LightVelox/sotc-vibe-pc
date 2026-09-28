@@ -11,6 +11,7 @@ file(GLOB SOTC_GENERATED_SOURCES CONFIGURE_DEPENDS "${SOTC_GENERATED_DIR}/*.cpp"
 set(SOTC_HOST_SOURCES
     src/main.cpp
     src/sotc/config.cpp
+    src/sotc/display_mode.cpp
     src/sotc/function_hooks.cpp
     src/sotc/game_disc.cpp
     src/sotc/hle/sce_cdvd.cpp

@@ -19,7 +19,8 @@ namespace sotc::config
             "PS2X_GS_GPU=1\n"
             "PS2X_GS_THREAD=1\n"
             "PS2X_MTVU=1\n"
-            "PS2X_VU1_RECOMP=1\n";
+            "PS2X_VU1_RECOMP=1\n"
+            "SOTC_VIDEO_MODE=NTSC\n";
 
         std::string trim(std::string_view value)
         {

@@ -35,7 +35,7 @@ Last updated: 2026-09-27 (seventeenth session: memory-card format, save and load
 * **Timing model for HLE'd I/O**: disc opens/stat/search/reads block the calling guest thread for a
   modelled DVD latency (seek + transfer). This reproduces the PS2's thread interleaving, which the game
   depends on (heap layout, module addresses, data-module linking before sound init).
-* **VSync** follows the GS video mode set by the game (PAL 50 Hz).
+* **VSync** follows the GS video mode selected at startup (PAL 50 Hz or NTSC 60 Hz).
 * **Pad input**: the game's own SIO2MAN, DBCMAN and DS1O_D run unmodified on the IOP emulator against an
   emulated SIO2 controller (`0x1F808200`, IRQ 17, DMA channels 11/12). Port 0 holds a `VirtualDualShock2`
   (digital/analog/pressure modes, config commands 0x40–0x4F, vibration map) fed from the host keyboard or

@@ -41,16 +41,17 @@ Last updated: 2026-09-27 (seventeenth session: memory-card format, save and load
   (digital/analog/pressure modes, config commands 0x40–0x4F, vibration map) fed from the host keyboard or
   gamepad. DS1O_D switches it to analog (0x73); DBCMAN delivers pad data to the EE work area
   (`0x14DA00`) through `sceSifSetDmaIntr`, and libpad2's `scePad2Read` sees it. Verified: D-pad down moves
-  the language-menu cursor and Cross leaves the menu. Keyboard: arrows = D-pad, WASD / IJKL = left / right
-  stick, X or Space = Cross, C or Backspace = Circle, Z = Square, V = Triangle, Q/E = L1/R1,
-  Left/Right Shift = L2/R2, Enter = Start, Tab = Select, F/G = L3/R3; gamepad 0/1 map to ports 0/1.
+  the language-menu cursor and Cross leaves the menu. Keyboard and mouse defaults: arrows = D-pad, WASD = left stick,
+  click-to-lock mouse = right stick, F = Cross, right mouse = Circle, left mouse = Square, Space = Triangle,
+  Q/Left Shift = L1/R1, Left Ctrl/Right Shift = L2/R2, Enter = Start, Tab = Select, H/G = L3/R3;
+  `PS2X_BIND_*` settings in `sotc.ini` configure every host button, and gamepad 0/1 map to ports 0/1.
   * Stick center is 0x7F (fifteenth session), as in PCSX2 (read from the game's pad buffer `0x12914B4` over PINE:
     `7f7f7f7f` at rest). The game reads raw stick bytes somewhere (not only through the 0.4 dead zone of
     `iosPadGetXZInputL/R`): with 0x80 at rest a scripted run diverged from PCSX2 before the first ride (Agro arrived at a
     different spot) and the user saw Agro drift right; with 0x7F the same script matches PCSX2 at fields 2550-2600.
     Gamepad axes map -1..1 to 0x00..0xFF around 0x7F.
   * Right stick inverted on both axes by default in this port (user request; `PS2X_INVERT_RIGHT_STICK=0|x|y|xy`
-    overrides, `ps2_host_input::setRightStickInvertDefault`). Only gamepad and keyboard input is flipped; pad scripts
+    overrides, `ps2_host_input::setRightStickInvertDefault`). Only gamepad and mouse input is flipped; pad scripts
     are not, so scripted runs stay comparable with PCSX2. The game's own options (`0x14770BC`/`0x14770C0` free-camera
     reverse LR/UD, `0x14770B0`/`0x14770B4` aiming) are 0 without a memory card.
 * **Save states (sixteenth session)**: F5 quick-saves and F9 quick-loads (`<exe dir>/states/quick.state`,

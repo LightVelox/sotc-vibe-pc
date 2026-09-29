@@ -189,6 +189,7 @@ int main(int argc, char *argv[])
     GSGpuBackend::SetAsyncPresentDefault(true);
     ps2x::asyncvif::setDefaultEnabled(true);
     ps2_host_input::setRightStickInvertDefault(ps2_host_input::kInvertRightX | ps2_host_input::kInvertRightY);
+    ps2_host_input::setMouseCameraEnabled(true);
 
     try
     {

@@ -445,6 +445,29 @@ Last updated: 2026-09-30 (intro and gameplay performance). Target: SCES-53326 v1
     first two instructions (neither may be a branch or PC-relative); the cave saves t0-t2 on the stack, appends
     {id, VBlank counter, a0-a3, ra, a word or a pointer chain like `[[a0+4]+8]`} to a ring at `0x00FF0000`
     (unused in both runs), replays the two instructions and jumps back. Found the event demo path in two runs.
+* **First colossus: spikes, hang and crash fixed (nineteenth session)**: all three had one cause. The runtime kept
+  its own guest-visible structures in the game's memory: placeholder RPC server descriptors (`0x1F10000`), RPC
+  packets, TLS blocks, boot-mode entries (`0x1F00000`-`0x1F31000`) and the stacks for handler/RPC-callback
+  invocations (carved down from `0x2000000`, the same place as the main thread's stack). SotC's heap reaches
+  `0x1F3A000` in the colossus area, so the game overwrote the placeholder descriptors, and every `SifCallRpc` then
+  wrote the call header into game data and copied the request to whatever the overwritten `buf` field pointed at.
+  `Sg2RemoteTickProc` (sound) sends one every field, so its request (recognizable by the return address `0x114f64`
+  inside it) ended up all over RAM, even at unaligned addresses. Near the colossus it landed in Valus's skeleton
+  (36 nodes at `0x1a6b0f0`, 64 bytes each, child at `+0x30`, sibling at `+0x34`). Bad bone data gave the stretched
+  orange fur spikes, a sibling cycle made the recursive bone walk `sub_011AE090` run until `$sp` went into MANAGER
+  code (`jal` words overwritten -> `JALR target=0x77ff040`), and with whistles and bow shots the game froze (fields
+  still ran). Deterministic repro: the pre-fight state crashed at field 11540 in 4 of 5 `PS2X_MTVU=0 PS2X_GS_GPU=0`
+  runs. Found with `SOTC_WATCH_WRITE` on the clobbered instruction, then on the bone links (writer:
+  `rpcCopyToRdram` <- `SifCallRpc` <- `Sg2RemoteTickProc`).
+  * **Fix**: `ps2xRuntime/src/lib/Kernel/GuestKernelMemory.h` places everything the runtime owns in the EE kernel
+    area, which games never use: pools at `0x40000`-`0x48000`, callback stacks (8 KB each, 22 slots; a fresh boot
+    uses 9, deepest use seen 0x860 bytes) at `0x48000`-`0x74000`. The game's own kernel code at `0x75000` is left
+    alone, and the unit tests' fixtures stay below `0x37000`. Loading an older save state moves its descriptors,
+    callback stacks, TLS and boot-mode entries to the new area (`relocateLegacyReservedMemory`, `serializeMachine`).
+  * **Result**: the pre-fight state with whistles and L1-aimed bow shots runs to 16800 at 60 fields/s with the
+    colossus intact (old build: spike at ~12800, frozen from ~13000); 4/4 normal and the deterministic runs pass
+    11540; New Game boot clean. Goldens SAME, `ps2x_tests` 496 (new test: IOP server descriptors live in kernel RAM
+    and `SifCallRpc` leaves game memory alone; it fails with the old pool address).
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
   with VSync rate and EE thread/semaphore snapshot (`SOTC_WATCHDOG`, `SOTC_WATCHDOG_THREADS`),
   sampling profiler (`SOTC_PROFILE=delay:seconds`), guest call tracer (`SOTC_TRACE_CALLS`), thread
@@ -851,10 +874,8 @@ is now skipped (old files kept as `*.before_session18.gsr`).
    Validate every shader change in-game, not only in `gs_replay`. Check the game's 60 Hz mode too (4.9M VU1 cycles
    per field).
    User reports to follow up (fifteenth session): the right-stick inversion and the stick-center fix (Agro drifting
-   right) need the user's confirmation; the first colossus shows elongated geometry around an otherwise fine body
-   (probably the fur; not reproduced yet: reaching it needs a ride plus a cliff climb; the game's
-   `gameflowSetPos`/`gameflowSetJumpSekiban` (save-stone jumps) might allow a scripted teleport; then a GS recording
-   and `PS2X_VU1_VERIFY=1` / new VU1 images captured with `PS2X_VU1_CAPTURE`). Then leave the shrine (light beam outdoors, the plains, the first colossus), capturing new VU1
+   right) need the user's confirmation. The first colossus's elongated geometry was memory corruption (fixed in the
+   nineteenth session, see Working); the user should confirm in a real fight (climbing, stabbing). Then leave the shrine (light beam outdoors, the plains, the first colossus), capturing new VU1
    images (`PS2X_VU1_CAPTURE`) and regenerating `Port/generated/vu1`. Scripted events that wait for their music now
    progress (SPU2 voice model); watch for other events waiting on sound signals (`bgmScriptRecvSoundSignal`).
    The opening cutscene's remaining differences (tower-wall mist, far mist billboards, haze scroll) come from the

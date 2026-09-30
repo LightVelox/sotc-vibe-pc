@@ -873,9 +873,8 @@ is now skipped (old files kept as `*.before_session18.gsr`).
    dispatches per 10 shrine fields remain (palette/texture streaming through fixed areas; would need write renaming).
    Validate every shader change in-game, not only in `gs_replay`. Check the game's 60 Hz mode too (4.9M VU1 cycles
    per field).
-   User reports to follow up (fifteenth session): the right-stick inversion and the stick-center fix (Agro drifting
-   right) need the user's confirmation. The first colossus's elongated geometry was memory corruption (fixed in the
-   nineteenth session, see Working); the user should confirm in a real fight (climbing, stabbing). Then leave the shrine (light beam outdoors, the plains, the first colossus), capturing new VU1
+   The Agro drift is fixed (horse steering commits). The first colossus is playable end to end (user, after the
+   nineteenth-session fix: fight, death cutscene, save, return to the shrine). Explore further (next colossi), capturing new VU1
    images (`PS2X_VU1_CAPTURE`) and regenerating `Port/generated/vu1`. Scripted events that wait for their music now
    progress (SPU2 voice model); watch for other events waiting on sound signals (`bgmScriptRecvSoundSignal`).
    The opening cutscene's remaining differences (tower-wall mist, far mist billboards, haze scroll) come from the

@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-29 (audio output; prior milestone: memory-card format, save and load). Target: SCES-53326 v1.00
+Last updated: 2026-09-30 (intro and gameplay performance). Target: SCES-53326 v1.00
 (see `GAME_BUILD.md`).
 
 ## Working
@@ -744,6 +744,101 @@ No game function is stubbed with placeholder return values.
   it reads ENVX of all 48 voices (`sceSdGetParam(0x500 | ...)`) into its table at `+0x70B8`. No SPU2 IRQ handler.
 * IOP import map: `sg2iop_driver` → libsd, sifcmd, sysclib, thbase; `DS1O_D` → sio2man, sio2d, dbcman;
   `MC2_D` → sio2man, sio2d, dbcman, secrman, cdvdman.
+
+## Intro performance investigation
+
+A live NTSC boot with MTVU, compiled VU1 programs and the GPU renderer enabled measured
+39-49 fields/s in the heavier intro shots. The VU worker was 90-95% busy and needed roughly
+19-23 ms of work per field, exceeding the 16.7 ms budget for 60 Hz. The sampled game thread
+spent about 51.6% waiting for VIF/VU synchronization. Audio mixing was about 3% of its sampled
+inclusive time; muting playback keeps the same emulated audio workload.
+
+The compiled VU1 integer-to-float helper now scales by an exact power-of-two reciprocal
+instead of vector division. Converted 32-bit integers remain normal finite floats at all VU
+conversion shifts, so this preserves the conversion result and removes division instructions
+from vertex processing. The playable build applies this to the hottest intro VU1 image;
+other images gain it when rebuilt. The existing cached game-code archive was reused for linking.
+
+Tower, passage and shrine replays verified all 279,281 recorded VU runs against the interpreter
+with zero mismatches, including register and pipeline state, memory and XGKICK packets.
+The follow-up found that VU0 reset and interpreted execution also invalidated the shared VU1
+normalized register cache. Invalidation now applies only to VU1; VU0 cannot use compiled VU1
+programs. A regression check confirms that VU0 preserves the cache while VU1 reset and
+interpreted execution invalidate it. The updated runtime also passed all 279,281 recorded VU
+runs with zero mismatches (`build/runs/intro-cache-verify-*`), and all 477 runtime tests passed
+with the current five GS golden recordings (`build/runs/intro-cache-runtime-tests.txt`).
+
+Those arithmetic and cache optimizations did not resolve the lag. Muted live NTSC runs over the same intro fields 1,800-3,200 averaged
+48.47 fields/s before and 48.49 after the cache fix and conversion change, an insignificant
+0.04% difference. The updated run reached field 3,225 and exited normally. Logs are under
+`build/runs/intro-cache-baseline` and `build/runs/intro-cache-optimized`. This work must not be
+reported as a completed intro performance improvement by themselves.
+
+Further experiments with alternate compilers, function sizes, outlined arithmetic helpers,
+sticky flag specialization and wider exact arithmetic did not establish a useful gain and
+were discarded. Guarded fixed pipeline schedules also saved only about 1% in a paired tower
+replay and were discarded. The benchmark's optional `--cpu-cycles` counter supports paired investigations;
+elapsed field rate in the actual game remains the acceptance measurement.
+
+Performance tests use `PS2X_AUDIO_MUTE=1` to silence host playback without changing normal
+launch settings or disabling emulated sound processing.
+
+The subsequent audio-queue investigation found sustained sample starvation: the heavy intro
+produced roughly 36,000-42,000 stereo frames/s while the host consumed 48,000. A D1_CHCR read
+could report the asynchronous VU worker finished before its work completed; the following
+VIF register read blocked the host game thread without advancing EE timers or audio. Restoring
+blocking VU cycle accounting improved fields 1,800-3,200 from 49.81 to 55.50 fields/s but still
+starved audio in several intervals.
+
+The port now enables `PS2X_VU1_HOST_PACING` by default. An unfinished VU job remains busy to
+the guest, and each poll can advance EE time up to the elapsed host time since its DMA kick,
+in bounded steps that respect scheduler checkpoints. This lets the game draw fewer frames
+under graphics load while timers and audio continue. This is adaptive graphics timing, not
+a claim of faster VU arithmetic or cycle-exact hardware timing. The runtime default remains
+off for other clients, and `PS2X_VU1_HOST_PACING=0` restores the old behavior.
+
+The first refined pacing run (`build/runs/intro-audio-host-clock`) held 59.94 fields/s over
+fields 1,800-3,200 versus 49.81 in `build/runs/intro-audio-baseline`, a 20.35% increase in game
+time throughput. The measured heavy-scene intervals had zero audio underruns. Presentation
+field rate is not the number of newly drawn frames. An earlier fixed-cycle polling experiment
+dropped drawing cadence unnecessarily and was replaced with elapsed-time accounting.
+
+IOP RPC execution also advanced its clock outside the EE scheduling budget, creating a steady
+audio surplus and periodic queue overflows. The IOP now debits all executed cycles, including
+RPC work and instruction overruns, from a signed EE cycle balance. Saving settles outstanding
+work into that balance; loading restores its reference clock without changing the serialized
+layout. A regression with repeated RPC calls failed before the fix and now passes, including
+a save/load with outstanding RPC work. All six IOP suites and all 477 runtime tests passed.
+
+## Gameplay performance (2026-09-30)
+
+Benchmark: NTSC, New Game, `2300v:start` skips the intro (control at ~2600), then `2700v:ldown:1500`
+walks Wander through the shrine and down the stairs; fields 3000-3900 are measured with
+`PS2X_MTVU_STATS`, `PS2X_GS_GPU_STATS` (now also reports drawn frames per second) and `PS2X_AUDIO_STATS`.
+Before this work the scene ran at 45-53 presented fields/s with repeated audio underruns. Per-thread CPU
+time showed the GameThread (EE) at ~93%, the VU thread ~70%, the GS thread ~38%. The GPU needs only ~9 ms
+per field in `gs_replay`; the in-game "GPU ms/frame" timer includes idle gaps between submissions.
+
+* MSVC reports C4883 ("function size suppresses optimizations", hidden by `/W0`) for 24 generated
+  functions longer than ~4,800 lines. `texTransResolve_0x119acc8` alone was 12.5% of the GameThread and had
+  a ~280 KB stack frame. `/d2OptimizeHugeFunctions` makes its machine code 4.6x smaller and is now set
+  for all of `sotc_game_code` (it only affects those 24 functions; each takes several minutes to compile,
+  so a full rebuild is ~60 min). Game code is also built with `/arch:AVX2 /GS-` (`/fp:precise` unchanged).
+* The hot runtime helpers (`Ps2ExtractEpi32/64`, `Ps2SetGprLow64`, fast reads/writes, address checks,
+  the empty `ps2TraceGuestWrite`, FPU clamp/add/sub/compare) are `PS2_FORCEINLINE`; MSVC emitted thousands
+  of calls to them inside large functions. This alone was worth only 1-3%.
+* `IopSubsystem::runEeCycles` batches EE cycles until the IOP's next 1,024-cycle batch is due and flushes
+  before RPC, SIF, module and state operations, so the IOP runs at exactly the same points.
+* `PS2X_EE_HOST_PACING` (default on in the port, requires MTVU): when the EE is more than half a field
+  behind the host clock, `EeScheduler::hostCatchUp` consumes EE cycles to catch up, so overloaded moments
+  drop frames instead of slowing the game and starving the audio queue.
+
+All of these leave the five golden recordings identical. Interleaved runs on a machine with background
+load: median 54.5 -> 57.7 fields/s and presented 46 -> 52 fields/s from the compiler changes; with EE pacing
+the benchmark holds 59.9 fields/s with zero audio underruns (55 drawn frames/s on average over fields
+2700-5900), and the intro (fields 1800-3200) holds 60 fields/s with zero underruns. The GameThread is now
+~75-85% busy in that scene. The golden recordings were re-recorded because the 50/60 Hz selection screen
+is now skipped (old files kept as `*.before_session18.gsr`).
 
 ## Next priorities
 

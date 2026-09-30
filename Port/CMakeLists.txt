@@ -81,7 +81,7 @@ if(SOTC_VU1_SOURCES)
 endif()
 
 if(MSVC)
-    target_compile_options(sotc_game_code PRIVATE /bigobj /fp:precise /W0 /MP $<$<CONFIG:RelWithDebInfo>:/Ob2>)
+    target_compile_options(sotc_game_code PRIVATE /bigobj /fp:precise /arch:AVX2 /GS- /d2OptimizeHugeFunctions /W0 /MP $<$<CONFIG:RelWithDebInfo>:/Ob2>)
     target_compile_options(sotc PRIVATE /fp:precise /W3 /utf-8)
     target_compile_definitions(sotc PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_link_options(sotc PRIVATE /FORCE:MULTIPLE /STACK:16777216 $<$<CONFIG:RelWithDebInfo>:/LTCG>)

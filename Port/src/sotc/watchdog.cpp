@@ -477,9 +477,19 @@ namespace sotc::watchdog
                 out << "\n    " << (100.0 * sorted[i].first / std::max(1, samples)) << "%  " << sorted[i].second;
             SOTC_INFO(Ee, out.str());
         };
-        report("profile self", self, 30);
+        const char *topValue = std::getenv("SOTC_PROFILE_TOP");
+        const size_t top = topValue ? static_cast<size_t>(std::max(1, std::atoi(topValue))) : 30u;
+        report("profile self", self, top);
         report("profile self lines", selfLines, 30);
         report("profile inclusive", inclusive, 40);
+        if (const char *focus = std::getenv("SOTC_PROFILE_FOCUS"))
+        {
+            std::map<std::string, int> focusLines;
+            for (const auto &stack : stacks)
+                if (names[stack.front()].find(focus) != std::string::npos)
+                    ++focusLines[lines[stack.front()]];
+            report("profile focus lines", focusLines, 40);
+        }
         std::vector<std::pair<int, std::string>> topSelf;
         for (const auto &[name, hits] : self)
             topSelf.emplace_back(hits, name);

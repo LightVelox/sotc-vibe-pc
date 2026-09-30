@@ -1,4 +1,5 @@
 #include "runtime/ps2_async_vif.h"
+#include "runtime/ee_scheduler.h"
 #include "runtime/ps2_input_options.h"
 #include "runtime/ps2_save_state.h"
 #include "ps2_runtime.h"
@@ -188,6 +189,8 @@ int main(int argc, char *argv[])
     GSThreadedBackend::SetGpuByDefault(true);
     GSGpuBackend::SetAsyncPresentDefault(true);
     ps2x::asyncvif::setDefaultEnabled(true);
+    ps2x::asyncvif::setHostPacingDefault(true);
+    EeScheduler::setHostPacingDefault(true);
     ps2_host_input::setRightStickInvertDefault(ps2_host_input::kInvertRightX | ps2_host_input::kInvertRightY);
     ps2_host_input::setMouseCameraEnabled(true);
 

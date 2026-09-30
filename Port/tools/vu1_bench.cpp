@@ -162,7 +162,7 @@ int main(int argc, char **argv)
 {
     if (argc < 3)
     {
-        std::fprintf(stderr, "usage: sotc_vu1_bench <trace.bin> <image-dir> [--verify] [--interp] [--repeat N]\n");
+        std::fprintf(stderr, "usage: sotc_vu1_bench <trace.bin> <image-dir> [--verify] [--interp] [--repeat N] [--cpu-cycles]\n");
         return 2;
     }
     const std::string tracePath = argv[1];
@@ -170,6 +170,7 @@ int main(int argc, char **argv)
     bool verify = false;
     bool interp = false;
     bool profile = false;
+    bool cpuCycles = false;
     uint32_t onlyPc = ~0u;
     int repeat = 1;
     for (int i = 3; i < argc; ++i)
@@ -181,6 +182,8 @@ int main(int argc, char **argv)
             interp = true;
         else if (arg == "--profile")
             profile = true;
+        else if (arg == "--cpu-cycles")
+            cpuCycles = true;
         else if (arg == "--only" && i + 1 < argc)
             onlyPc = static_cast<uint32_t>(std::stoul(argv[++i], nullptr, 16));
         else if (arg == "--repeat" && i + 1 < argc)
@@ -248,6 +251,7 @@ int main(int argc, char **argv)
     uint64_t mismatches = 0;
     uint64_t runs = 0;
     uint64_t vuCycles = 0;
+    uint64_t threadCycles = 0;
     VU1State lastRegs{};
     bool haveLast = false;
     Sampler sampler;
@@ -284,9 +288,16 @@ int main(int argc, char **argv)
             vu1_impl::packetSink = &sink;
             const uint64_t cycleBefore = record.state.cycle;
             sampler.active = true;
+            ULONG64 threadBefore = 0;
+            if (cpuCycles && !QueryThreadCycleTime(GetCurrentThread(), &threadBefore))
+                return 1;
             const auto start = std::chrono::steady_clock::now();
             A::runLoopWith(*vu, image.data(), 0x4000u, work.data(), 0x4000u, gs, nullptr, record.maxCycles, compiled);
             const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            ULONG64 threadAfter = 0;
+            if (cpuCycles && !QueryThreadCycleTime(GetCurrentThread(), &threadAfter))
+                return 1;
+            threadCycles += threadAfter - threadBefore;
             sampler.active = false;
             vu1_impl::packetSink = nullptr;
             sink.packets.clear();
@@ -315,6 +326,8 @@ int main(int argc, char **argv)
     }
     std::printf("total %.3f ms, %.3f ms per field, %.2f M VU cycles per field, %.2f ns per VU cycle\n", total * 1000.0 / repeat,
                 total * 1000.0 / repeat / fields, vuCycles / 1e6 / repeat / fields, total * 1e9 / std::max<uint64_t>(vuCycles, 1u));
+    if (cpuCycles)
+        std::printf("CPU %.3f M thread cycles per field\n", threadCycles / 1e6 / repeat / fields);
     for (const auto &[hash, seconds] : imageSeconds)
         std::printf("  %016" PRIx64 " %.3f ms per field\n", hash, seconds * 1000.0 / repeat / fields);
     std::vector<std::pair<double, std::pair<uint64_t, uint32_t>>> entries;

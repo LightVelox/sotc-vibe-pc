@@ -133,14 +133,14 @@ Clamping of overflowed results to ±FLT_MAX is not yet implemented (tracked).
 
 ### Rendering, audio, input
 
-Currently provided by the PS2Recomp runtime (GS emulation to a raylib window; audio backend). Input is
-implemented as below; rendering and audio follow the planned structure, not yet implemented:
+Currently provided by the PS2Recomp runtime (GS emulation to a raylib window; audio backend). Input and
+ADPCM audio output are implemented as below:
 
 ```
 Game logic (recompiled) ─► GIF/VIF/VU packets ─► GS command stream ─► Renderer interface ─► backend
 raylib keyboard/gamepad ─► ps2_host_input snapshot ─► IopHost::readPad ─► SIO2 port 0: VirtualDualShock2
                                                           (SIO2MAN ◄─ DS1O_D ◄─ DBCMAN ─► SIF DMA ─► libpad2)
-SPU2 / sg2iop_driver ─► audio mixer interface ─► host audio
+SPU2 / sg2iop_driver ─► IopSpu2 ADPCM stereo mixer ─► IopHost::submitAudio ─► raylib 48 kHz audio stream
 ```
 
 Nothing here is enhanced: resolution, frame rate, textures and draw distance stay original until the
@@ -150,10 +150,17 @@ What the game actually requires on the IOP side (from IRX import tables, `Tools/
 
 * **Audio.** The game's own driver `SG2IOPM1.IRX` (`sg2iop_driver`) imports LIBSD functions directly
   (ordinals 4–26) and is driven from EE-side `Sg2*` code in KERNEL. LIBSD programs SPU2 registers and
-  DMA channels 4/7. The runtime currently offers only a coarse VAG-sample player and an EE-side LIBSD
-  RPC service, so faithful audio needs an SPU2 model behind the IOP (register level, or LIBSD-import
-  HLE) feeding a host mixer. Candidate: an existing GPL-compatible SPU2 implementation behind a
-  small interface, so it can later be swapped for a native mixer.
+  DMA channels 4/7. The register-level `IopSpu2` model decodes ADPCM blocks with per-voice predictor
+  history, loops, four-tap Gaussian pitch interpolation, ADSR, direct voice volumes, mixer gates, and both cores'
+  master volumes and core-0-to-core-1 routing. It advances at 48 kHz from the IOP cycle clock, including
+  idle scheduler time, and sends interleaved signed 16-bit stereo samples through `IopHost::submitAudio`.
+  Audio reaches the host in 512-frame blocks; silent voices retain address timing without decoding
+  inaudible samples. The host callback primes 2,048 stereo frames (about 43 ms) before playback,
+  fades out and re-primes after underruns, and crossfades after queue overruns. Loading a state clears
+  host audio and restores decoder and interpolation state; legacy states without the optional `SPCM`
+  and `SINT` sections remain readable. See `Docs/AUDIO.md` for interpolation provenance and buffering.
+  Reverb, volume sweeps, noise, pitch modulation,
+  AutoDMA PCM input, and SPU2 IRQ address handling remain fidelity gaps.
 * **Pad and memory card.** libpad2/libdbc (EE) talk to `DBCMAN`, which drives `DS1O_D` (DualShock)
   and `MC2_D` (memory card) over `SIO2MAN`/`SIO2D`. All of these IRX modules run unmodified on the IOP
   emulator; the boundary is the SIO2 hardware (`ps2xIOP/src/emulator/devices/iop_sio2.cpp`). Its pad

@@ -61,3 +61,12 @@ Other existing `PS2X_` and `SOTC_` settings can also be placed under `[Settings]
 names. An environment variable with the same name takes precedence, so existing test scripts and
 command-line overrides keep working. Escape no longer closes the window; use the window's close
 button to exit. Enter remains the Start button.
+
+Audio starts automatically with the game. The original sound driver supplies music, dialogue, and
+effects from the disc image to a 48 kHz stereo stream. The game's sound options control voice and
+master volumes. Reverb, hardware volume sweeps, noise, pitch modulation, and AutoDMA PCM input are
+not implemented yet; normal ADPCM voices and the game's double-buffered ADPCM streams are supported.
+
+For diagnostics, set `PS2X_AUDIO_DUMP` to a writable `.wav` path to record the mixed output before
+the host playback queue. Close the game normally to finalize the WAV header. `Tools/audio_check.py`
+records a scripted boot and reports the sample rate, channels, peak, and number of nonzero samples.

@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-27 (seventeenth session: memory-card format, save and load). Target: SCES-53326 v1.00
+Last updated: 2026-09-29 (audio output; prior milestone: memory-card format, save and load). Target: SCES-53326 v1.00
 (see `GAME_BUILD.md`).
 
 ## Working
@@ -18,7 +18,20 @@ Last updated: 2026-09-27 (seventeenth session: memory-card format, save and load
   PCSX2 at KERNEL entry.
 * **IOP**: the game's IOP modules (SIO2MAN, DBCMAN, SIO2D, DS1O_D, LIBSD, `sg2iop_driver`, MC2_D) load
   from the disc image and EE buffers and execute on the runtime's IOP emulator; the sound driver's RPC
-  server comes up. SPU2 has a voice model on the IOP side (see "Tutorial hints"), no audio output yet.
+  server comes up. SPU2 has a voice model on the IOP side (see "Tutorial hints") and now decodes and
+  mixes ADPCM voices to a 48 kHz stereo host stream. Reverb and other fidelity gaps are listed below.
+  The initial audio bring-up IOP test suite passed 6/6, including known stereo PCM, mixer muting, key-off silence, and decoder
+  save/load checks. A scripted boot through field 2016 recorded 1,952,513 stereo frames at 48 kHz,
+  with a peak of 16,976 and nonzero soundtrack samples, and closed normally. That check used the
+  rebuilt runtime with the unchanged cached game-code library; a listening comparison remains pending.
+  The user's listening feedback reported continuous harshness and crackling that worsened with lag.
+  The follow-up adds four-tap Gaussian interpolation, batches host submissions into 512-frame blocks,
+  skips decoding silent voices while preserving their address timing. The user then reported gaps,
+  especially during the intro video. Adaptive host resampling made the sound significantly worse
+  according to the user's next listening check and has been reverted. Host playback again uses a
+  fixed 48 kHz rate with about 43 ms buffered and fades across underruns and overruns. The user
+  suspects game slowdown caused the earlier gaps; that cause remains unconfirmed. Listening
+  validation of the restored executable remains pending.
 * **Memory card (seventeenth session)**: enabled by default (`PS2X_MEMCARD=0` in `sotc.ini` disables it; see
   `Docs/CONFIGURATION.md`); the game's card driver now completes its
   DBCMAN/MC2_D requests, reads a blank card, offers to format it, formats it, and writes a shrine save.
@@ -646,7 +659,7 @@ Last updated: 2026-09-27 (seventeenth session: memory-card format, save and load
 |---|---|---|
 | Gameplay speed | The shrine runs at 48-49.5 fields/s; VU thread 87-91% busy and EE thread ~95% busy (the GPU renderer is no longer the limit) | VU1 codegen (the paired raw/normalized VF locals spill heavily; per-FMAC safety check), XGKICK sync on every VU store, EE-side HLE of hot library routines |
 | Emulation speed | Opening cutscene: clouds 50, canyon ~49, riders ~50, forest ~49, towers ~42, passage ~41; the towers/passage are VU-thread bound (~21-22 ms of VU work per field); 60-70% of VU1 work in one microprogram (image 2048debd entry 0x05B0) | more AOT codegen work measured with `sotc_vu1_bench` |
-| Audio | `IopSpu2` models voice playback (addresses, loop flags, ENDX, ADSR, DMA/PIO into SPU2 RAM) but produces no samples | ADPCM decode + volume/pitch modulation/noise + reverb per core, mixed to a host audio backend fed at 48 kHz from the IOP cycle clock; SPU2 IRQ address |
+| Audio | `IopSpu2` decodes ADPCM voices and streams from SPU2 RAM, applies pitch interpolation, ADSR, direct stereo voice/master volumes and mixer gates, and feeds a bounded 48 kHz host stream; decoder state survives save/load | Hardware volume sweeps, pitch modulation, noise, reverb per core, AutoDMA PCM input, SPU2 IRQ address; listening comparison with PCSX2 |
 | Rumble | Motor values reach `IopHost::padVibration`, but raylib's GLFW backend cannot drive rumble | host rumble backend (XInput/SDL) |
 | FMV | FFmpeg disabled | decide decoder strategy |
 | EE cycle accounting | 8 EE cycles per recompiled-function dispatch, 32 per loop back-edge, 0 per syscall; the PS2 kernel spends ~45-250 instructions per syscall | no longer a speed problem (the idle thread is skipped); charge syscall costs only if a timing difference shows up |

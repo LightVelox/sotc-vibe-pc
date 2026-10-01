@@ -206,3 +206,7 @@ shaders; `0` restores the compute rasterizer. `PS2X_GS_HW_TRIANGLES=0` draws tri
 (exact but slower). Variants compile in the background on first use and are stored in the GS shader cache
 directory; until a variant is ready its batches use the compute rasterizer. `PS2X_THREAD_PRIORITY=0`
 leaves the emulator threads and process at normal priority.
+
+`PS2X_VU1_TIMING` defaults to `0` in the port: heavy scenes render as fast as the PC allows while the game clock
+still follows real time. Set `PS2X_VU1_TIMING=1` to make the EE wait for modelled VU1 time like a PS2 (heavy
+scenes then drop to 30 or 20 fps). `PS2X_GS_HW_LOG=1` logs hardware raster shader compiles and fallbacks.

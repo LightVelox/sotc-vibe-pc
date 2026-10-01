@@ -16,6 +16,13 @@ Last updated: 2026-10-01 (hardware-rasterized GS path, canyon/water performance)
   use the compute rasterizer. Water replay 12.3 -> 7.2 ms/field, foreground water 5-7 -> 54-56 visible
   frames/s, GPU 97% -> ~45%. Output equals the compute path except a few pixels per field off by 1.
   Present handoff slots 3 -> 8. The EE game thread (~80-90% busy) is now the limit for a locked 60.
+* **No shader hitches, VU1 timing off by default**: hardware raster shader variants compile and load on a
+  separate `GSShaderCompiler` thread with its own shared GL context; every state seen before is listed in
+  `hw_keys.txt` in the shader cache and preloaded at startup; the compute fallback uses exact triangle binning.
+  `PS2X_GS_HW_LOG=1` logs compiles, fallbacks and slow flushes. The VU1 timing model capped heavy scenes at the
+  PS2's 30 fps (Gaius needs ~6.4 M VU1 cycles per frame); since the game clock follows real time it no longer
+  prevents slow motion, so the port now defaults to `PS2X_VU1_TIMING=0` (`1` restores PS2-like timing).
+  Gaius fight 29 -> 59.8, lake swim 59.9, canyon 59.9 presented frames/s, game clock unchanged.
 * **Codegen**: guest memory accesses below 0x10000000 skip the I/O range checks and GPR writes are a single
   64-bit store (full rebuild; golden windows identical to the previous build). Game/VU/GS/GIF threads run at
   raised priority (`PS2X_THREAD_PRIORITY=0` disables; no measurable effect under background load). The

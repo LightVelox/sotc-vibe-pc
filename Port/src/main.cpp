@@ -199,6 +199,8 @@ int main(int argc, char *argv[])
 #if defined(_WIN32)
     if (!std::getenv("PS2X_GS_SHADER_CACHE_DIR"))
         _putenv_s("PS2X_GS_SHADER_CACHE_DIR", (cacheDir / "gs_shaders").string().c_str());
+    if (!std::getenv("PS2X_VU1_TIMING"))
+        _putenv_s("PS2X_VU1_TIMING", "0");
 #endif
     paths.cdImage = std::filesystem::absolute(iso);
     std::error_code error;

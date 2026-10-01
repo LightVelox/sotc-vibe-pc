@@ -2,6 +2,7 @@
 #include "runtime/ee_scheduler.h"
 #include "runtime/ps2_input_options.h"
 #include "runtime/ps2_save_state.h"
+#include "runtime/ps2_display_options.h"
 #include "ps2_runtime.h"
 #include "runtime/gs/gs_threaded_backend.h"
 #include "runtime/gs/gs_gpu_backend.h"
@@ -30,6 +31,7 @@ void registerGeneratedVu1Programs();
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #if defined(_WIN32)
@@ -199,6 +201,8 @@ int main(int argc, char *argv[])
     try
     {
         PS2Runtime runtime;
+        const char *maximizeWindow = std::getenv("SOTC_WINDOW_MAXIMIZED");
+        ps2_host_display::setStartMaximized(!maximizeWindow || std::string_view(maximizeWindow) != "0");
         if (!runtime.initialize("Shadow of the Colossus"))
         {
             SOTC_ERROR(Boot, "runtime initialization failed");

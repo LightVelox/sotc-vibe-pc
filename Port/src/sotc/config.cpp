@@ -25,7 +25,9 @@ namespace sotc::config
             "PS2X_VU1_RECOMP=1\n"
             "SOTC_VIDEO_MODE=NTSC\n";
 
-        constexpr std::array<std::pair<std::string_view, std::string_view>, 16> kDefaultBindings{{
+        constexpr std::array<std::pair<std::string_view, std::string_view>, 18> kMigratedSettings{{
+            {"SOTC_WIDESCREEN", "1"},
+            {"SOTC_WINDOW_MAXIMIZED", "1"},
             {"PS2X_BIND_UP", "UP"},
             {"PS2X_BIND_DOWN", "DOWN"},
             {"PS2X_BIND_LEFT", "LEFT"},
@@ -71,7 +73,7 @@ namespace sotc::config
             if (created)
             {
                 created << kDefaults;
-                for (const auto &[key, value] : kDefaultBindings)
+                for (const auto &[key, value] : kMigratedSettings)
                     created << key << '=' << value << '\n';
             }
         }
@@ -84,7 +86,7 @@ namespace sotc::config
         }
 
         bool inSettings = false;
-        std::array<bool, kDefaultBindings.size()> bindingPresent{};
+        std::array<bool, kMigratedSettings.size()> settingPresent{};
         std::string line;
         size_t lineNumber = 0;
         while (std::getline(input, line))
@@ -115,10 +117,10 @@ namespace sotc::config
                 std::cerr << "Unknown setting at " << path.string() << ':' << lineNumber << '\n';
                 continue;
             }
-            for (size_t i = 0; i < kDefaultBindings.size(); ++i)
+            for (size_t i = 0; i < kMigratedSettings.size(); ++i)
             {
-                if (key == kDefaultBindings[i].first)
-                    bindingPresent[i] = true;
+                if (key == kMigratedSettings[i].first)
+                    settingPresent[i] = true;
             }
             if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
                 value = value.substr(1, value.size() - 2);
@@ -132,16 +134,16 @@ namespace sotc::config
                 std::cerr << "Cannot apply setting " << key << " from " << path.string() << '\n';
         }
 
-        if (std::any_of(bindingPresent.begin(), bindingPresent.end(), [](bool present) { return !present; }))
+        if (std::any_of(settingPresent.begin(), settingPresent.end(), [](bool present) { return !present; }))
         {
             std::ofstream append(path, std::ios::app);
             if (append)
             {
                 append << "\n[Settings]\n";
-                for (size_t i = 0; i < kDefaultBindings.size(); ++i)
+                for (size_t i = 0; i < kMigratedSettings.size(); ++i)
                 {
-                    if (!bindingPresent[i])
-                        append << kDefaultBindings[i].first << '=' << kDefaultBindings[i].second << '\n';
+                    if (!settingPresent[i])
+                        append << kMigratedSettings[i].first << '=' << kMigratedSettings[i].second << '\n';
                 }
             }
         }

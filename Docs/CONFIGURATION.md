@@ -14,6 +14,8 @@ PS2X_GS_THREAD=1
 PS2X_MTVU=1
 PS2X_VU1_RECOMP=1
 SOTC_VIDEO_MODE=NTSC
+SOTC_WIDESCREEN=1
+SOTC_WINDOW_MAXIMIZED=1
 PS2X_BIND_UP=UP
 PS2X_BIND_DOWN=DOWN
 PS2X_BIND_LEFT=LEFT
@@ -80,6 +82,21 @@ side, and `NONE` removes a keyboard or mouse binding. Controller bindings are un
 Set `SOTC_VIDEO_MODE=PAL` for 50 Hz or `SOTC_VIDEO_MODE=NTSC` for 60 Hz. NTSC is the
 default when the setting is absent. The game applies this choice at startup and skips the
 50/60 Hz selection screen.
+
+`SOTC_WIDESCREEN=1` adapts the game's native camera projection to the window's aspect ratio and compensates the
+horizontal coordinates of HUD sprites, menu sprites, and text to retain their proportions.
+Set it to `0` for the original 4:3 view. The INI choice overrides the in-game widescreen option.
+Widescreen fills the entire window in both windowed and fullscreen modes. Resizing the window
+adjusts the camera's horizontal field of view and UI compensation without stretching either.
+With widescreen disabled, the original 4:3 view has black bars when needed. Boot screens retain
+4:3 until the game uses its camera projection. The INI choice is reapplied when the camera updates,
+including after loading a save state; a saved display option does not override it.
+
+`SOTC_WINDOW_MAXIMIZED=1` starts with a maximized window by default. Set it to `0` to start
+with the original 640-by-480 window. Press F11 to enter or leave borderless fullscreen at the
+current monitor's resolution. Leaving fullscreen restores the previous window size and
+maximized state. Switching releases the mouse cursor; click the game to capture it again.
+Existing INI files gain missing widescreen and window settings on the next launch.
 
 Other existing `PS2X_` and `SOTC_` settings can also be placed under `[Settings]` using their full
 names. An environment variable with the same name takes precedence, so existing test scripts and

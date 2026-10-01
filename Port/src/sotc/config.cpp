@@ -25,7 +25,13 @@ namespace sotc::config
             "PS2X_VU1_RECOMP=1\n"
             "SOTC_VIDEO_MODE=NTSC\n";
 
-        constexpr std::array<std::pair<std::string_view, std::string_view>, 18> kMigratedSettings{{
+        constexpr std::array<std::pair<std::string_view, std::string_view>, 24> kMigratedSettings{{
+            {"PS2X_GS_DIRECT_PRESENT", "1"},
+            {"PS2X_GS_COMPACT_QUEUE", "1"},
+            {"PS2X_GS_QUEUE_CHUNKS", "8"},
+            {"PS2X_VIF_SIMD_UNPACK", "1"},
+            {"PS2X_VU1_SIMD_CLIP", "1"},
+            {"SOTC_VSYNC", "1"},
             {"SOTC_WIDESCREEN", "1"},
             {"SOTC_WINDOW_MAXIMIZED", "1"},
             {"PS2X_BIND_UP", "UP"},
@@ -136,6 +142,18 @@ namespace sotc::config
 
         if (std::any_of(settingPresent.begin(), settingPresent.end(), [](bool present) { return !present; }))
         {
+            for (size_t i = 0; i < kMigratedSettings.size(); ++i)
+            {
+                const std::string key(kMigratedSettings[i].first);
+                const std::string value(kMigratedSettings[i].second);
+                if (settingPresent[i] || std::getenv(key.c_str()))
+                    continue;
+#if defined(_WIN32)
+                _putenv_s(key.c_str(), value.c_str());
+#else
+                setenv(key.c_str(), value.c_str(), 0);
+#endif
+            }
             std::ofstream append(path, std::ios::app);
             if (append)
             {

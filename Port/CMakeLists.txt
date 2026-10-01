@@ -27,6 +27,16 @@ set(SOTC_HOST_SOURCES
     src/sotc/watchdog.cpp
 )
 
+set(SOTC_GAME_CODE_LIBRARY "" CACHE FILEPATH "Reuse an unchanged generated EE library for host-only builds")
+if(SOTC_GAME_CODE_LIBRARY)
+    if(NOT EXISTS "${SOTC_GAME_CODE_LIBRARY}")
+        message(FATAL_ERROR "Cached generated EE library does not exist: ${SOTC_GAME_CODE_LIBRARY}")
+    endif()
+    add_library(sotc_game_code STATIC IMPORTED)
+    set_target_properties(sotc_game_code PROPERTIES IMPORTED_LOCATION "${SOTC_GAME_CODE_LIBRARY}")
+    target_include_directories(sotc_game_code INTERFACE "${SOTC_GENERATED_DIR}")
+    target_link_libraries(sotc_game_code INTERFACE ps2_runtime)
+else()
 add_library(sotc_game_code STATIC ${SOTC_GENERATED_SOURCES})
 target_include_directories(sotc_game_code PUBLIC "${SOTC_GENERATED_DIR}")
 target_link_libraries(sotc_game_code PUBLIC ps2_runtime)
@@ -39,6 +49,7 @@ target_precompile_headers(sotc_game_code PRIVATE
     "${CMAKE_SOURCE_DIR}/External/PS2Recomp/ps2xRuntime/include/ps2_syscalls.h"
     "${CMAKE_SOURCE_DIR}/External/PS2Recomp/ps2xRuntime/include/ps2_stubs.h"
 )
+endif()
 
 add_executable(sotc ${SOTC_HOST_SOURCES})
 target_include_directories(sotc PRIVATE src "${SOTC_GENERATED_DIR}")
@@ -83,7 +94,9 @@ if(SOTC_VU1_SOURCES)
 endif()
 
 if(MSVC)
-    target_compile_options(sotc_game_code PRIVATE /bigobj /fp:precise /arch:AVX2 /GS- /d2OptimizeHugeFunctions /W0 /MP $<$<CONFIG:RelWithDebInfo>:/Ob2>)
+    if(NOT SOTC_GAME_CODE_LIBRARY)
+        target_compile_options(sotc_game_code PRIVATE /bigobj /fp:precise /arch:AVX2 /GS- /d2OptimizeHugeFunctions /W0 /MP $<$<CONFIG:RelWithDebInfo>:/Ob2>)
+    endif()
     target_compile_options(sotc PRIVATE /fp:precise /W3 /utf-8)
     target_compile_definitions(sotc PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_link_options(sotc PRIVATE /FORCE:MULTIPLE /STACK:16777216 $<$<CONFIG:RelWithDebInfo>:/LTCG>)

@@ -9,6 +9,10 @@ This is not an emulator frontend: there is no interpreter for EE code, no PCSX2 
 only interpreted code is IOP (R3000A) driver code and VU microprograms, both confined to the
 runtime's hardware layer and replaceable.
 
+Captured VU1 images now use ahead-of-time compiled CPU programs with SIMD helpers; uncaptured
+images retain the interpreter fallback. The GPU GS renderer draws pixels after that CPU geometry
+work. GPU rendering therefore does not imply that PS2 VU geometry runs on the GPU.
+
 ## Repository layout
 
 ```
@@ -145,6 +149,25 @@ SPU2 / sg2iop_driver ─► IopSpu2 ADPCM stereo mixer ─► IopHost::submitAud
 
 Nothing here is enhanced: resolution, frame rate, textures and draw distance stay original until the
 native baseline is proven against PCSX2 checkpoints.
+
+On Windows, the experimental `PS2X_GS_DIRECT_PRESENT=1` path creates the window GL context before
+the GS worker joins its share group. The existing CRTC compute compositor writes a GPU buffer,
+which is transferred into a shared texture through a pixel-unpack buffer. A three-texture ring
+uses separate producer and consumer fences. The window polls at its own refresh cadence, selects
+the newest completed texture, and repeats that image until another is ready. The main thread queues
+presentation without draining the GS worker; unavailable sharing falls back to the previous RAM
+readback/upload path. The finished image stays on the GPU in the shared path. Optional image hashing
+reads only an eight-byte fingerprint after the producer fence.
+
+The GS command queue can send draw state once for consecutive primitives with identical state
+bytes, then send their vertices separately; the worker reconstructs the original batches. Its
+outstanding chunk limit is configurable to bound CPU backlog. These are experimental transport and
+submission changes. Scripted gameplay, GPU queue equivalence, and correctness checks are documented
+in `Docs/PERFORMANCE_RESULTS.md`; see `Docs/PERFORMANCE.md` for switches and rollback.
+
+Linked GPU programs can be cached using exact GLSL source, driver identity, and a binary checksum.
+Cache rejection falls back to source compilation. This reduces repeated startup compilation and does
+not change GPU rasterization or move the CPU VU geometry programs onto the GPU.
 
 What the game actually requires on the IOP side (from IRX import tables, `Tools/irx_imports.py`):
 

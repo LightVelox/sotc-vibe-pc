@@ -11,11 +11,17 @@ PS2X_MOUSE_SENSITIVITY=1.0
 PS2X_MOUSE_VERTICAL_SENSITIVITY=1.0
 PS2X_GS_GPU=1
 PS2X_GS_THREAD=1
+PS2X_GS_DIRECT_PRESENT=1
+PS2X_GS_COMPACT_QUEUE=1
+PS2X_GS_QUEUE_CHUNKS=8
+PS2X_VIF_SIMD_UNPACK=1
+PS2X_VU1_SIMD_CLIP=1
 PS2X_MTVU=1
 PS2X_VU1_RECOMP=1
 SOTC_VIDEO_MODE=NTSC
 SOTC_WIDESCREEN=1
 SOTC_WINDOW_MAXIMIZED=1
+SOTC_VSYNC=1
 PS2X_BIND_UP=UP
 PS2X_BIND_DOWN=DOWN
 PS2X_BIND_LEFT=LEFT
@@ -37,6 +43,55 @@ PS2X_BIND_R3=G
 Set `PS2X_MEMCARD=0` to run without a memory card. The slot 1 card image is stored at
 `memcards/Mcd001.ps2` beside the executable. `PS2X_INVERT_RIGHT_STICK` accepts `0`, `x`, `y`, or
 `xy`. `PS2X_GS_GPU`, `PS2X_GS_THREAD`, `PS2X_MTVU`, and `PS2X_VU1_RECOMP` accept `0` or `1`.
+
+`SOTC_VSYNC=1` synchronizes the host window to the monitor's refresh rate, without a second
+60 Hz software limiter. On monitors above 60 Hz, input is sampled at the display cadence while
+the emulated game retains its own NTSC/PAL timing. Set `SOTC_VSYNC=0` to disable VSync and use
+a 120 Hz host window and input polling limit. This can reduce input delay but can show tearing.
+Existing INI files gain this setting on launch.
+
+The experimental `PS2X_GS_DIRECT_PRESENT=1` path shares OpenGL textures between the GS worker
+and the window. CRTC output stays on the GPU: its buffer becomes a texture through a GPU pixel-buffer
+transfer, with no completed-frame copy to RAM or window texture upload from RAM. The window polls
+producer fences, takes the newest completed texture, and protects textures still used by window draws
+with consumer fences. Presentation requests are queued without draining the GS worker. If WGL sharing
+is unavailable, startup reports the fallback to RAM presentation. Set it to `0` for the previous path.
+
+`PS2X_GS_COMPACT_QUEUE=1` sends draw state only when its bytes change and sends vertices separately.
+The GS worker reconstructs the original primitive batches in order. `0` restores complete batches.
+`PS2X_GS_QUEUE_CHUNKS=8` limits outstanding GS command chunks (normally about 64 KB each) to bound
+CPU submission backlog. It accepts 1 through 256; `256` restores the previous limit. This bounds CPU
+commands, not the driver's GPU queue, and needs a gameplay comparison for the best overlap on this PC.
+
+`PS2X_VIF_SIMD_UNPACK=1` expands unmasked 8/16/32-bit VIF vectors and applies row addition using
+SSE integer operations. Masked and fill-mode operations keep their existing paths. `0` restores the
+previous scalar fast unpacker. `PS2X_VU1_SIMD_CLIP=1` uses SIMD integer comparisons for compiled VU1
+clip flags; `0` restores scalar comparisons. FMAC arithmetic, exceptional values, pipeline timing,
+XGKICK timing, and the generated game logic retain their existing implementations.
+
+Missing INI settings are applied on the first launch as well as appended to the file. Scripted gameplay,
+runtime/VU checks, GPU queue comparisons, and window/save-state checks are recorded in
+[PERFORMANCE_RESULTS.md](PERFORMANCE_RESULTS.md). See [PERFORMANCE.md](PERFORMANCE.md)
+for separate comparisons, correctness checks, heavy scenes, and rollback instructions.
+
+Linked GPU shaders are cached in `<exe dir>/game_data/gs_shaders`. Entries require the same exact
+shader source and driver identity and a valid binary checksum; failed entries are compiled from source.
+`PS2X_GS_SHADER_CACHE=0` disables the cache. `PS2X_GS_SHADER_CACHE_DIR=<directory>` overrides its
+location. The first uncached launch or a driver/shader change can still require shader compilation.
+
+`PS2X_FRAME_TIMES=<absolute CSV path>` records host swap intervals and submission/swap-call time.
+On the shared path it also records the completed texture sequence. Optional `PS2X_FRAME_HASH=1`
+fingerprints the pixels and identifies repeated images: the shared path reduces the image on the GPU
+and reads eight bytes after its fence; the RAM path hashes its existing CPU pixels. Leave hashing off
+for primary performance comparisons, because it adds work. Swap return times do not measure physical
+monitor scanout or end-to-end input latency. The game scheduler update counter and its timer clock
+must be measured separately from VBlanks; the capture tools do this. `drawn/s` remains the number of
+presentation intervals containing primitive submissions, not proof of distinct gameplay images.
+
+The asynchronous GPU readback polls completed frames without waiting for a busy readback slot.
+When all slots are busy, the window keeps the most recent completed image. `PS2X_GS_GPU_STATS=1`
+reports `readback skips` for this condition. VSync and readback changes do not increase the game's
+simulation frame rate or remove its original movement and animation easing.
 
 `PS2X_VU1_HOST_PACING` defaults to `1` in this port. While the VU worker is busy, the game
 continues polling the device and advances timers and audio according to the elapsed host time.

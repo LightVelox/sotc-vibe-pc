@@ -4,6 +4,7 @@
 #include "ps2_runtime_macros.h"
 #include "runtime/ps2_memory.h"
 #include "runtime/ps2_display_options.h"
+#include "raylib.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -135,6 +136,16 @@ namespace sotc
             }
             ctx->pc = GPR_U32(ctx, 31);
         }
+    }
+
+    void configureHostDisplay()
+    {
+        const char *setting = std::getenv("SOTC_VSYNC");
+        const bool vsync = !setting || std::string_view(setting) != "0";
+        if (vsync)
+            SetWindowState(FLAG_VSYNC_HINT);
+        SetTargetFPS(vsync ? 0 : 120);
+        SOTC_INFO(Boot, "host display: " << (vsync ? "monitor VSync" : "120 Hz polling, VSync off"));
     }
 
     void installDisplayMode(PS2Runtime &runtime)

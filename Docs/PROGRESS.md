@@ -1,6 +1,6 @@
 # Progress
 
-Last updated: 2026-09-30 (intro and gameplay performance). Target: SCES-53326 v1.00
+Last updated: 2026-10-01 (performance implementation and authorized validation). Target: SCES-53326 v1.00
 (see `GAME_BUILD.md`).
 
 ## Working
@@ -880,7 +880,34 @@ the benchmark holds 59.9 fields/s with zero audio underruns (55 drawn frames/s o
 ~75-85% busy in that scene. The golden recordings were re-recorded because the 50/60 Hz selection screen
 is now skipped (old files kept as `*.before_session18.gsr`).
 
+## Display pacing and input responsiveness (2026-10-01)
+
+The host window previously ran with VSync off and a fixed 60 Hz software limiter, independently
+of the monitor refresh and the emulated NTSC/PAL clock. The port now defaults to monitor VSync
+without the extra software limiter. `SOTC_VSYNC=0` uses a 120 Hz host window/input polling limit.
+This changes host presentation and input sampling, leaving guest animation and movement timing intact.
+
+The asynchronous GPU presentation ring previously waited up to one second for a busy readback
+slot. It now polls all slots without blocking and retains the newest completed image when no
+slot is available. Readback sequence numbers prevent an older completion from replacing a newer
+image, and GPU statistics report readback skips.
+
+The follow-up validation is recorded in [PERFORMANCE_RESULTS.md](PERFORMANCE_RESULTS.md). The earlier
+field-rate measurements do not establish smooth frame delivery; scenes can retain 60 fields/s
+while logic updates and newly drawn images arrive less often. Further work on stable simulation
+cadence or animation interpolation remains separate from these presentation changes.
+
 ## Next priorities
+
+Current performance acceptance is actual game updates, changed images delivered to the window,
+frame-time tails, and input response with preserved game-clock speed. The rates and bottleneck
+percentages below are historical observations, not measurements of the current build. The new
+shared presentation, compact command queue, bounded submission backlog, VIF SIMD unpacker, and
+VU1 SIMD clip path were subsequently tested after the user authorized validation. The shader binary
+cache removes repeated startup compilation. Submission cost improved consistently, while background
+CPU load and run variance prevent a reliable overall gameplay FPS claim. See
+[PERFORMANCE_RESULTS.md](PERFORMANCE_RESULTS.md) for measurements, correctness evidence, and
+remaining limitations, and [PERFORMANCE.md](PERFORMANCE.md) for implementation and rollback.
 
 1. Speed (target: paced 50 fields/s everywhere). The shrine (48-49.5) and the cutscene (49-50, towers/passage ~41-42)
    are VU-thread bound (87-91% busy) with the EE thread close behind (~95% in the shrine). VU side: the compiled

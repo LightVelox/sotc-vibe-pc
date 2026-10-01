@@ -468,6 +468,23 @@ Last updated: 2026-09-30 (intro and gameplay performance). Target: SCES-53326 v1
     colossus intact (old build: spike at ~12800, frozen from ~13000); 4/4 normal and the deterministic runs pass
     11540; New Game boot clean. Goldens SAME, `ps2x_tests` 496 (new test: IOP server descriptors live in kernel RAM
     and `SifCallRpc` leaves game memory alone; it fails with the old pool address).
+* **Game speed follows real time (nineteenth session)**: the game's logic steps by a measured delta
+  (`0x1477270`, computed in `sub_01356340` from `iosGetTCount`), and that tick count is a 64-bit accumulator at
+  `0x1F8A98` that the timer 0 overflow handler `sub_001A85E8` bumps by 0x10000 every 65536 BUSCLK ticks (2250 per
+  second). The runtime's EE timers raised one interrupt per batch of elapsed cycles no matter how many overflows it
+  contained, and dropped overflows that happened while OVFF was still set, so the game clock ran at 0.89x real time at
+  full frame rate (the whole game ~10% slow) and at 0.37x when frames dropped (slow motion). `ps2_memory.cpp` now keeps
+  a per-timer backlog of missed overflow/compare events and raises the interrupt again each time the guest
+  acknowledges the flag; interrupts found during timer register accesses are kept for delivery. Quadratus fight: game
+  clock 1.000x real, game speed 0.98x at 30 game frames/s; with three instances forcing ~19 game frames/s the game
+  takes 0.05 s steps and still runs at 0.94x (was 0.37-0.71x). Goldens SAME, `ps2x_tests` 497 (new backlog test).
+* **Scenario harness (nineteenth session)**: `Tools/scenario.py` tests every colossus fight unattended, using the
+  game's own functions through a new debug-script hook in the port (`SOTC_DEBUG_SCRIPT`, see `Docs/TESTING.md`): the
+  Time Attack warp `bossStatTimeAttackJumpSekiban`, the colossus kill callback behind `SCRBossDebugDeath`, and
+  checks for crashes, stalls, game-logic freezes (scheduler frame counter `0x1DC9EC`), black screens and whether the
+  colossus ends up dead. All 16 fights run from one save state (warp, intro cutscene, fight, kill, death cutscene,
+  save prompt), about 20 minutes with two instances, and each run leaves `build/saved_states/colossusNN_fight.state`
+  for quick single-fight tests.
 * **Diagnostics**: game TTY (`[GAME]` = guest stdout), categorized logs (`SOTC_TRACE`), stack watchdog
   with VSync rate and EE thread/semaphore snapshot (`SOTC_WATCHDOG`, `SOTC_WATCHDOG_THREADS`),
   sampling profiler (`SOTC_PROFILE=delay:seconds`), guest call tracer (`SOTC_TRACE_CALLS`), thread

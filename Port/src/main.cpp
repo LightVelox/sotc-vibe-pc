@@ -7,6 +7,7 @@
 #include "runtime/gs/gs_gpu_backend.h"
 #include "sotc/function_hooks.h"
 #include "sotc/config.h"
+#include "sotc/debug_script.h"
 #include "sotc/display_mode.h"
 #include "sotc/game_disc.h"
 #include "sotc/idle_thread.h"
@@ -239,6 +240,7 @@ int main(int argc, char *argv[])
         registerGeneratedVu1Programs();
 #endif
         sotc::installCallTracesFromEnvironment(runtime);
+        sotc::installDebugScriptFromEnvironment(runtime);
         sotc::FunctionHooks::instance().logBindings();
 
         sotc::watchdog::startFromEnvironment(&runtime);

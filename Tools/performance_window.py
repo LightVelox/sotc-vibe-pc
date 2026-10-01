@@ -111,7 +111,7 @@ def exercise_window(pid, action):
         if not user.SetWindowPos(window, None, 0, 0, 1280, 720, 6):
             raise ctypes.WinError(ctypes.get_last_error())
     elif action == "minimize":
-        user.PostMessageW(window, 0x112, 0xF020, 0)
+        user.ShowWindow(window, 6)
     elif action == "restore":
         user.ShowWindow(window, 9)
     rect = wt.RECT()

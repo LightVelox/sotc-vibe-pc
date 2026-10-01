@@ -1,5 +1,10 @@
 # Performance results, 2026-10-01
 
+The saved lake/canyon investigation is recorded separately in
+[CANYON_PERFORMANCE_RESULTS.md](CANYON_PERFORMANCE_RESULTS.md). It uses the user's private
+quick-state copy and a bounded camera circle, and does not reuse the shrine as its benchmark.
+The results below belong to the earlier committed work and remain historical evidence.
+
 The user authorized validation after the initial build. Shared GPU presentation consistently reduced
 host submission cost. Overall gameplay FPS and frame-delivery gains remain inconclusive: the game
 still runs around the low-to-mid 30s in these shrine samples, and other processes substantially affect

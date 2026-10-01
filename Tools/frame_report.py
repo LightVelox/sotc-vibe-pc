@@ -44,6 +44,7 @@ def main():
     changed = [float(row["seconds"]) for row in valid_hash if row["image_changed"] == "1"]
     source_changes = [row for row in frames[1:] if row["new_source"] == "1"]
     source_times = [float(row["seconds"]) for row in source_changes]
+    published_sources = int(frames[-1]["source_sequence"]) - int(frames[0]["source_sequence"])
     logic_gaps = []
     update_at = timeline[0][1]
     for previous, current in zip(timeline, timeline[1:]):
@@ -57,24 +58,42 @@ def main():
         "game_scheduler_updates_per_second": round(updates / guest_elapsed, 3),
         "game_clock_seconds_per_wall_second": round(clock_ticks / 147456000 / guest_elapsed, 5),
         "host_swap_calls_per_second": round((len(frames) - 1) / elapsed, 3),
+        "completed_sources_observed_per_second": round(published_sources / elapsed, 3) if any(row["shared"] == "1" for row in frames) else None,
         "completed_sources_delivered_per_second": round(len(source_changes) / elapsed, 3) if any(row["shared"] == "1" for row in frames) else None,
+        "completed_sources_skipped_between_deliveries": published_sources - len(source_changes) if published_sources else None,
+        "repeated_source_swaps": len(frames) - 1 - len(source_changes),
         "changed_images_per_second": round(sum(row["image_changed"] == "1" for row in valid_hash[1:]) / elapsed, 3) if len(valid_hash) == len(frames) else None,
         "repeated_image_swaps": sum(row["image_changed"] == "0" for row in valid_hash[1:]) if valid_hash else None,
         "host_swap_interval_ms": percentiles([float(row["interval_ms"]) for row in frames[1:]]),
         "changed_image_interval_ms": percentiles([(b - a) * 1000 for a, b in zip(changed, changed[1:])]),
         "completed_source_interval_ms": percentiles([(b - a) * 1000 for a, b in zip(source_times, source_times[1:])]),
         "observed_game_update_interval_ms": percentiles(logic_gaps),
+        "emulated_vblank_interval_ms": percentiles([(b[1] - a[1]) * 1000 for a, b in zip(timeline, timeline[1:])]),
+        "stalls_over_50_ms": {
+            "updates": sum(value > 50 for value in logic_gaps),
+            "source_delivery": sum((b - a) > 0.05 for a, b in zip(source_times, source_times[1:])),
+            "changed_images": sum((b - a) > 0.05 for a, b in zip(changed, changed[1:])) if valid_hash else None,
+        },
         "host_submit_ms": percentiles([float(row["submit_ms"]) for row in frames]),
         "host_swap_call_ms": percentiles([float(row["swap_ms"]) for row in frames]),
         "notes": [
             "Host swaps are API returns, not physical display or photon timestamps.",
             "Completed sources are compositor outputs; they are not necessarily different images.",
+            "Completed source sequence span includes published sources skipped by the window, through the last acquired completed fence; it is not a GPU completion timestamp trace.",
             "Image change uses a 64-bit pixel fingerprint and dimensions; hash collisions remain possible.",
             "Image hashes add work and should be disabled for the primary performance comparison.",
             "Game update gaps are sampled at fields and cannot resolve multiple updates within one field.",
             "The two traces select the same field window; their first and last wall timestamps can differ.",
         ],
     }
+    if (root / "camera.csv").exists():
+        with (root / "camera.csv").open(newline="") as handle:
+            camera = [row for row in csv.DictReader(handle) if first <= int(row["field"]) <= last]
+        gaps = [(float(b["seconds"]) - float(a["seconds"])) * 1000 for a, b in zip(camera, camera[1:])]
+        report["camera_update_interval_ms"] = percentiles(gaps)
+        if camera:
+            report["camera_yaw_range"] = [min(float(row["yaw"]) for row in camera), max(float(row["yaw"]) for row in camera)]
+            report["camera_pitch_range"] = [min(float(row["pitch"]) for row in camera), max(float(row["pitch"]) for row in camera)]
     if (root / "resources.csv").exists():
         with (root / "resources.csv").open(newline="") as handle:
             samples = [row for row in csv.DictReader(handle) if timeline[0][1] <= float(row["absolute_seconds"]) <= timeline[-1][1]]

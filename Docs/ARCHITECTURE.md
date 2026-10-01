@@ -169,6 +169,17 @@ Linked GPU programs can be cached using exact GLSL source, driver identity, and 
 Cache rejection falls back to source compilation. This reduces repeated startup compilation and does
 not change GPU rasterization or move the CPU VU geometry programs onto the GPU.
 
+The canyon preparation path can reuse an immutable observer list without allocating/copying
+`std::function` objects at every hook entry, resolve guest call targets with one validated dense-table
+lookup, and reuse the last texture's address-page footprint. The latter stores no texture data and
+leaves all live transfer and write/read hazard handling in place. GPU triangle setup can use bounded
+native integer conversion with exact halfway-away-from-zero rounding and explicit three-value bounds.
+No guest scheduler/cycle, VU arithmetic, queue ordering, or framebuffer content policy changes here.
+
+Optional camera-blur suppression hooks only the `screenBlur` call returning to `0x1180F90` in
+`cameraBlur`. The original camera-history calculation still runs, and no persistent game blur flag
+changes. This separates a verified camera-motion effect from framebuffer feedback and other blending.
+
 What the game actually requires on the IOP side (from IRX import tables, `Tools/irx_imports.py`):
 
 * **Audio.** The game's own driver `SG2IOPM1.IRX` (`sg2iop_driver`) imports LIBSD functions directly

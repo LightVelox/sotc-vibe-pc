@@ -1,9 +1,35 @@
 # Progress
 
-Last updated: 2026-10-01 (performance implementation and authorized validation). Target: SCES-53326 v1.00
+Last updated: 2026-10-01 (hardware-rasterized GS path, canyon/water performance). Target: SCES-53326 v1.00
 (see `GAME_BUILD.md`).
 
 ## Working
+
+* **Hardware-rasterized GS path** (`PS2X_GS_HW_RASTER`, default on): the user's water and canyon saves ran at
+  ~5-7 visible fps with the window in the foreground because the compute GS rasterizer saturated the GPU
+  (~35x overdraw in the water, primitives serialized per 16x16 tile) and the shared-present handoff then
+  dropped frames. Earlier automated runs all had the window in the background and never saw it. The GPU now
+  rasterizes per-primitive quads (sprites/points: exact box; triangles: edges pushed out 0.75 px, slivers fall
+  back to the box) and the fragment shader runs the exact GS coverage test, shades outside and blends inside
+  an ordered fragment-shader interlock. Each draw state gets a specialized shader variant, compiled in the
+  background and cached on disk (`hw_*.glbin` in the GS shader cache); batches whose variant is not ready
+  use the compute rasterizer. Water replay 12.3 -> 7.2 ms/field, foreground water 5-7 -> 54-56 visible
+  frames/s, GPU 97% -> ~45%. Output equals the compute path except a few pixels per field off by 1.
+  Present handoff slots 3 -> 8. The EE game thread (~80-90% busy) is now the limit for a locked 60.
+* **Codegen**: guest memory accesses below 0x10000000 skip the I/O range checks and GPR writes are a single
+  64-bit store (full rebuild; golden windows identical to the previous build). Game/VU/GS/GIF threads run at
+  raised priority (`PS2X_THREAD_PRIORITY=0` disables; no measurable effect under background load). The
+  timeline (`SOTC_TIMELINE`) now records `flips=` (calls to the game's present callback `0x1C3070`), the
+  reliable count of frames the game shows; `SOTC_CAMERA_PITCH_TEST` scripts a mouse pitch sweep.
+
+* **Saved lake/canyon performance investigation**: the user's quick state was privately copied and
+  visually confirmed; a small stationary-player camera circle preserves the canyon framing. Guest
+  updates, composited sources, fingerprinted changes, host swaps, game clock, tails, and background
+  CPU load are measured separately. Reversible observer, dispatch, texture-footprint and triangle
+  preparation changes retain exact behavior, but no reliable overall FPS gain is established by the
+  alternating comparisons. An identified camera-motion blur pass has an optional, narrowly scoped
+  disable switch, off by default. Runtime tests, canyon VU oracle checks, GPU/VRAM equivalence and
+  private state/window exercises pass. See [CANYON_PERFORMANCE_RESULTS.md](CANYON_PERFORMANCE_RESULTS.md).
 
 * **Build identification**: disc, boot ELF, modules and IRX files fingerprinted (SHA-256); Redump
   match confirmed via PCSX2's bundled database. Tooling and the executable refuse other builds.

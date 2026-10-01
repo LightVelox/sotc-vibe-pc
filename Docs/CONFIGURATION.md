@@ -74,6 +74,30 @@ runtime/VU checks, GPU queue comparisons, and window/save-state checks are recor
 [PERFORMANCE_RESULTS.md](PERFORMANCE_RESULTS.md). See [PERFORMANCE.md](PERFORMANCE.md)
 for separate comparisons, correctness checks, heavy scenes, and rollback instructions.
 
+The canyon preparation experiments each default to enabled and can be reversed separately:
+`SOTC_FAST_OBSERVERS=0` restores observer-vector copies, `PS2X_EE_SINGLE_LOOKUP=0` restores the
+two guest-call table lookups, `PS2X_GS_TEXTURE_PAGE_CACHE=0` recomputes texture address-page masks,
+and `PS2X_GS_FAST_TRIANGLE_SETUP=0` restores library rounding and small-array bounds calculations.
+The page cache stores only an address footprint; pixel contents, transfers, hazards, and copy-on-write
+remain live. Fast triangle setup preserves halfway-away-from-zero rounding, edges, winding, and
+coverage, with library fallback outside the bounded coordinate range. These switches do not change
+guest cycle accounting or pacing. See the separate canyon results before interpreting them as FPS gains.
+
+`SOTC_DISABLE_MOTION_BLUR=0` preserves the original effect. Set it to `1` to suppress only the
+`screenBlur` draw called by `cameraBlur` at guest return address `0x1180F90`. Camera-motion history
+and intensity calculations continue; no guest enable flag is overwritten or saved differently.
+Other callers of `screenBlur`, framebuffer-feedback passes, bloom, fog, shadows, and ordinary
+blending retain their original behavior. This effect activates during the faster bounded canyon
+camera test, but remains below its draw threshold in the slower test. It is separate from low-FPS
+judder and is not interpolation. The missing setting is appended to an INI with default `0`.
+
+For diagnostics, `SOTC_CAMERA_TEST=firstField:periodFields:radiusPixels:cycles` drives the native
+mouse camera through a 60-field approach, a small yaw/pitch circle, and a 60-field return to center.
+Radius is limited to 20 pixels, approximately 2.86 degrees at sensitivity 1. Period must be at least
+60 fields. It sends no player movement input. Validate the saved view before using it; a bounded
+offset alone cannot guarantee any arbitrary initial view is a canyon. `SOTC_CAMERA_TRACE=<CSV path>`
+records camera update entry times, yaw/pitch, target and eye positions. Both are off by default.
+
 Linked GPU shaders are cached in `<exe dir>/game_data/gs_shaders`. Entries require the same exact
 shader source and driver identity and a valid binary checksum; failed entries are compiled from source.
 `PS2X_GS_SHADER_CACHE=0` disables the cache. `PS2X_GS_SHADER_CACHE_DIR=<directory>` overrides its
@@ -174,3 +198,11 @@ queue, so they can reveal gaps that are absent from the pre-queue WAV dump.
 For diagnostics, set `PS2X_AUDIO_DUMP` to a writable `.wav` path to record the mixed output before
 the host playback queue. Close the game normally to finalize the WAV header. `Tools/audio_check.py`
 records a scripted boot and reports the sample rate, channels, peak, and number of nonzero samples.
+
+## Hardware GS rasterization
+
+`PS2X_GS_HW_RASTER=1` (default) draws GS primitives with the GPU rasterizer and per-state specialized
+shaders; `0` restores the compute rasterizer. `PS2X_GS_HW_TRIANGLES=0` draws triangles as bounding boxes
+(exact but slower). Variants compile in the background on first use and are stored in the GS shader cache
+directory; until a variant is ready its batches use the compute rasterizer. `PS2X_THREAD_PRIORITY=0`
+leaves the emulator threads and process at normal priority.

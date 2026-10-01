@@ -238,6 +238,41 @@ minimize, restore, and switch focus. Confirm logs show `[gs-present] shared GPU 
 enabled, or a fallback when unavailable. If any experiment regresses output or frame delivery, disable
 that switch and retain the other independently accepted changes.
 
+## Saved lake/canyon procedure
+
+The private fixture is `build/canyon-20261001/canyon.state`, copied from `build/port/bin/states/quick.state`.
+The original quick slot and cards are preserved. For ordinary gameplay with private saves/cards:
+
+```powershell
+.\Tools\private_state_launch.ps1 -State .\build\canyon-20261001\canyon.state
+```
+
+Add `-DisableMotionBlur` for the optional clarity comparison. Existing private cards and INI choices
+persist in `build/private-play`. The input fixture is separate from that directory's F5/F9 slot.
+
+For a fresh 20-second measured circle, use:
+
+```powershell
+python Tools/performance_capture.py all --scene manual --state build/canyon-20261001/canyon.state --camera-test 104200:240:10:5 --out build/canyon-repeat --seconds 31 --end-field 105560 --screenshot-fields 104190,105520
+python Tools/frame_report.py build/canyon-repeat --first-field 104260 --last-field 105460
+```
+
+`all` retains the previous committed optimizations. For this task's baseline add four settings:
+`--setting SOTC_FAST_OBSERVERS=0 --setting PS2X_EE_SINGLE_LOOKUP=0
+--setting PS2X_GS_TEXTURE_PAGE_CACHE=0 --setting PS2X_GS_FAST_TRIANGLE_SETUP=0`.
+Do not use the harness's older `baseline` variant: that disables the previous committed changes too.
+Alternate the runs. Primary runs omit hashing, sampling, camera CSV, GPU queries, and screenshots
+inside the measured window. Separate `--hash-images --camera-trace` runs diagnose changed-image and
+camera cadence. `PS2X_FRAME_HASH_DEVICE=0` restores the earlier CPU-mapped hash-atomic path;
+the new default reduces in GPU memory and copies eight bytes after its barrier. Neither hash mode
+affects ordinary gameplay when `PS2X_FRAME_HASH=0`.
+
+The slow sequence stays within approximately ±1.43 degrees; `104200:60:20:20` stays within
+approximately ±2.86 degrees and activates the original camera-blur effect. Confirm each source state
+and the sequence's extremes visually before reusing these numbers for another state. No movement
+stick is sent. Do not load another state during a measured circle; start each run from the fixture.
+See [CANYON_PERFORMANCE_RESULTS.md](CANYON_PERFORMANCE_RESULTS.md) for current findings and limits.
+
 ## Remaining limits
 
 Historical profiles still identify generated EE game/graphics preparation and VU geometry execution

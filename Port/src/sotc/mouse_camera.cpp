@@ -7,6 +7,8 @@
 #include "runtime/ps2_memory.h"
 
 #include <cstdlib>
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <string_view>
 
@@ -30,6 +32,59 @@ namespace sotc
         bool g_targetReady = false;
         bool g_anglesReady = false;
         bool g_freeCameraActive = false;
+
+        struct CameraTest
+        {
+            uint64_t first = 0;
+            uint64_t period = 0;
+            uint64_t cycles = 0;
+            float radius = 0.0f;
+            bool pitchSweep = false;
+            double previousX = 0.0;
+            double previousY = 0.0;
+            uint64_t previousField = 0;
+            FILE *trace = nullptr;
+
+            ~CameraTest()
+            {
+                if (trace)
+                    std::fclose(trace);
+            }
+
+            ps2_host_input::MouseCameraInput input(uint64_t field)
+            {
+                if (field < previousField)
+                    previousX = previousY = 0.0;
+                previousField = field;
+                double x = 0.0;
+                double y = 0.0;
+                constexpr uint64_t ramp = 60;
+                if (pitchSweep)
+                {
+                    if (field >= first && field < first + 2 * period * cycles)
+                    {
+                        const uint64_t phase = (field - first) % (2 * period);
+                        y = radius * static_cast<double>(phase < period ? phase : 2 * period - phase);
+                    }
+                }
+                else if (field >= first && field < first + ramp)
+                    x = radius * static_cast<double>(field - first) / ramp;
+                else if (field >= first + ramp && field < first + ramp + period * cycles)
+                {
+                    const double phase = 2.0 * std::numbers::pi * static_cast<double>((field - first - ramp) % period) / period;
+                    x = radius * std::cos(phase);
+                    y = radius * std::sin(phase);
+                }
+                else if (field >= first + ramp + period * cycles && field < first + 2 * ramp + period * cycles)
+                    x = radius * (1.0 - static_cast<double>(field - first - ramp - period * cycles) / ramp);
+                const ps2_host_input::MouseCameraInput result{static_cast<float>(previousX - x), static_cast<float>(y - previousY), true};
+                previousX = x;
+                previousY = y;
+                return result;
+            }
+        };
+
+        CameraTest g_test;
 
         float readFloat(const uint8_t *rdram, uint32_t address)
         {
@@ -157,13 +212,67 @@ namespace sotc
             SOTC_ERROR(Hook, "cannot install mouse camera: angle selection function missing");
             return;
         }
+        if (const char *test = std::getenv("SOTC_CAMERA_TEST"))
+        {
+            unsigned long long first = 0, period = 0, cycles = 0;
+            float radius = 0.0f;
+            if (std::sscanf(test, "%llu:%llu:%f:%llu", &first, &period, &radius, &cycles) == 4 &&
+                period >= 60 && period <= 36000 && cycles > 0 && cycles <= 100 && std::isfinite(radius) && radius > 0 && radius <= 20)
+            {
+                g_test.first = first;
+                g_test.period = period;
+                g_test.radius = radius;
+                g_test.cycles = cycles;
+                SOTC_INFO(Hook, "bounded camera test: field " << first << ", period " << period << ", radius " << radius << " pixels, cycles " << cycles);
+            }
+            else
+                SOTC_ERROR(Hook, "invalid SOTC_CAMERA_TEST; expected first:period:radiusPixels:cycles");
+        }
+        if (const char *test = std::getenv("SOTC_CAMERA_PITCH_TEST"))
+        {
+            unsigned long long first = 0, period = 0, cycles = 0;
+            float speed = 0.0f;
+            if (std::sscanf(test, "%llu:%llu:%f:%llu", &first, &period, &speed, &cycles) == 4 &&
+                period >= 1 && period <= 36000 && cycles > 0 && cycles <= 100 && std::isfinite(speed) && speed != 0.0f)
+            {
+                g_test.first = first;
+                g_test.period = period;
+                g_test.radius = speed;
+                g_test.cycles = cycles;
+                g_test.pitchSweep = true;
+                SOTC_INFO(Hook, "camera pitch test: field " << first << ", half period " << period << ", " << speed << " pixels per field, cycles " << cycles);
+            }
+            else
+                SOTC_ERROR(Hook, "invalid SOTC_CAMERA_PITCH_TEST; expected first:halfPeriodFields:pixelsPerField:cycles");
+        }
+        if (const char *trace = std::getenv("SOTC_CAMERA_TRACE"))
+        {
+            g_test.trace = std::fopen(trace, "w");
+            if (g_test.trace)
+                std::fprintf(g_test.trace, "seconds,field,updates,yaw,pitch,target_x,target_y,target_z,eye_x,eye_y,eye_z\n");
+        }
         if (!FunctionHooks::instance().observeEntry(kCameraUpdate, "camera_mouse_input",
-                                                    [](uint8_t *, R5900Context *ctx, PS2Runtime *) {
+                                                    [](uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime) {
                                                         const uint32_t camera = GPR_U32(ctx, 4);
                                                         if (camera != g_camera)
                                                             g_anglesReady = false;
                                                         g_camera = camera;
                                                         g_mouseInput = ps2_host_input::consumeMouseCameraInput();
+                                                        const uint64_t field = runtime->memory().gs().vsyncTick.load();
+                                                        if (g_test.period)
+                                                            g_mouseInput = g_test.input(field);
+                                                        if (g_test.trace)
+                                                        {
+                                                            uint32_t updates;
+                                                            std::memcpy(&updates, rdram + 0x1DC9ECu, sizeof(updates));
+                                                            const uint32_t common = camera + kCameraCommon;
+                                                            const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                                                            std::fprintf(g_test.trace, "%.6f,%llu,%u,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n", seconds,
+                                                                         static_cast<unsigned long long>(field), updates,
+                                                                         readFloat(rdram, common + 0x150u), readFloat(rdram, common + 0x154u),
+                                                                         readFloat(rdram, common + 0x120u), readFloat(rdram, common + 0x124u), readFloat(rdram, common + 0x128u),
+                                                                         readFloat(rdram, common + 0x130u), readFloat(rdram, common + 0x134u), readFloat(rdram, common + 0x138u));
+                                                        }
                                                         g_targetReady = false;
                                                         g_freeCameraActive = false;
                                                         if (!g_mouseInput.active)

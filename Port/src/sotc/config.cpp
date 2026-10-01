@@ -25,7 +25,8 @@ namespace sotc::config
             "PS2X_VU1_RECOMP=1\n"
             "SOTC_VIDEO_MODE=NTSC\n";
 
-        constexpr std::array<std::pair<std::string_view, std::string_view>, 24> kMigratedSettings{{
+        constexpr std::array<std::pair<std::string_view, std::string_view>, 25> kMigratedSettings{{
+            {"SOTC_DISABLE_MOTION_BLUR", "0"},
             {"PS2X_GS_DIRECT_PRESENT", "1"},
             {"PS2X_GS_COMPACT_QUEUE", "1"},
             {"PS2X_GS_QUEUE_CHUNKS", "8"},

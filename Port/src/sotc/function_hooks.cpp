@@ -2,7 +2,9 @@
 #include "sotc/log.h"
 
 #include <iomanip>
+#include <cstdlib>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 
@@ -15,6 +17,7 @@ namespace sotc
             FunctionBinding binding;
             GuestFunction original = nullptr;
             std::vector<EntryObserver> observers;
+            std::shared_ptr<const std::vector<EntryObserver>> snapshot;
         };
 
         std::mutex g_mutex;
@@ -84,6 +87,7 @@ namespace sotc
             }
         }
         it->second.observers.push_back(std::move(observer));
+        it->second.snapshot = std::make_shared<const std::vector<EntryObserver>>(it->second.observers);
         return true;
     }
 
@@ -109,6 +113,11 @@ namespace sotc
         const uint32_t address = ctx->pc;
         GuestFunction original = nullptr;
         std::vector<EntryObserver> observers;
+        std::shared_ptr<const std::vector<EntryObserver>> snapshot;
+        static const bool fast = [] {
+            const char *setting = std::getenv("SOTC_FAST_OBSERVERS");
+            return !setting || std::string_view(setting) != "0";
+        }();
         {
             std::lock_guard<std::mutex> lock(g_mutex);
             const auto it = g_hooks.find(address);
@@ -119,9 +128,12 @@ namespace sotc
                 return;
             }
             original = it->second.original;
-            observers = it->second.observers;
+            if (fast)
+                snapshot = it->second.snapshot;
+            else
+                observers = it->second.observers;
         }
-        for (const auto &observer : observers)
+        for (const auto &observer : snapshot ? *snapshot : observers)
         {
             observer(rdram, ctx, runtime);
         }

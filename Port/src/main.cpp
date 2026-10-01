@@ -14,6 +14,7 @@
 #include "sotc/idle_thread.h"
 #include "sotc/log.h"
 #include "sotc/module_guard.h"
+#include "sotc/motion_blur.h"
 #include "sotc/mouse_camera.h"
 #include "sotc/window_icon.h"
 #include "sotc/watchdog.h"
@@ -131,6 +132,17 @@ int main(int argc, char *argv[])
     const std::filesystem::path exeDir = executableDirectory();
     sotc::config::load(exeDir / "sotc.ini");
     sotc::log::configureFromEnvironment();
+#if defined(_WIN32)
+    if (const char *priority = std::getenv("PS2X_THREAD_PRIORITY"); !priority || !*priority || *priority != '0')
+    {
+        SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+        PROCESS_POWER_THROTTLING_STATE throttling{};
+        throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+        throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        throttling.StateMask = 0;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
+    }
+#endif
     std::filesystem::path iso;
     for (int i = 1; i < argc; ++i)
     {
@@ -247,6 +259,7 @@ int main(int argc, char *argv[])
         sotc::installIdleThreadSkip(runtime);
         sotc::installDisplayMode(runtime);
         sotc::installMouseCamera(runtime);
+        sotc::installMotionBlurOption(runtime);
 #if SOTC_HAS_VU1_PROGRAMS
         registerGeneratedVu1Programs();
 #endif

@@ -68,12 +68,16 @@ def main():
     parser.add_argument("--save-state", help="Field at which to save a private state")
     parser.add_argument("--verify-vu", action="store_true")
     parser.add_argument("--exercise-window", action="store_true")
+    parser.add_argument("--source-bin", type=Path)
+    parser.add_argument("--setting", action="append", default=[])
+    parser.add_argument("--camera-test")
+    parser.add_argument("--camera-trace", action="store_true")
     args = parser.parse_args()
     if args.seconds <= 0:
         parser.error("--seconds must be positive")
     if args.state and args.scene != "manual" and args.pad_script is None:
         parser.error("Use --scene manual with a saved state, or supply its field-based --pad-script")
-    source = ROOT / "build/port/bin"
+    source = (args.source_bin or ROOT / "build/port/bin").resolve()
     out = args.out or ROOT / "build/performance" / (time.strftime("%Y%m%d-%H%M%S") + "-" + args.variant + "-" + args.scene)
     out = out.resolve()
     out.mkdir(parents=True, exist_ok=False)
@@ -114,10 +118,21 @@ def main():
     settings["PS2X_PAD_SCRIPT"] = args.pad_script if args.pad_script is not None else pads[args.scene]
     environment = dict(os.environ)
     environment["_NT_SYMBOL_PATH"] = str(source)
-    for key in ["PS2X_STATE_LOAD_AT", "PS2X_STATE_SAVE_AT", "SOTC_DEBUG_SCRIPT", "SOTC_POKE", "SOTC_PROFILE", "PS2X_VU1_VERIFY", "PS2X_GS_RECORD", "PS2X_GS_TRACE"]:
+    for key in ["PS2X_STATE_LOAD_AT", "PS2X_STATE_SAVE_AT", "SOTC_DEBUG_SCRIPT", "SOTC_POKE", "SOTC_PROFILE", "SOTC_CAMERA_TEST", "SOTC_CAMERA_TRACE", "SOTC_TRACE_CALLS", "PS2X_VU1_VERIFY", "PS2X_GS_RECORD", "PS2X_GS_TRACE", "PS2X_GS_GPU_PROF"]:
         environment.pop(key, None)
     if args.state:
-        settings["PS2X_STATE_LOAD_AT"] = "1:" + str(args.state.resolve()).replace("\\", "/")
+        private_state = out / "input.state"
+        shutil.copy2(args.state, private_state)
+        settings["PS2X_STATE_LOAD_AT"] = "1:" + str(private_state).replace("\\", "/")
+    if args.camera_test:
+        settings["SOTC_CAMERA_TEST"] = args.camera_test
+    if args.camera_trace:
+        settings["SOTC_CAMERA_TRACE"] = str(out / "camera.csv")
+    for setting in args.setting:
+        key, separator, value = setting.partition("=")
+        if not separator or not key.startswith(("SOTC_", "PS2X_")):
+            parser.error("--setting requires SOTC_KEY=value or PS2X_KEY=value")
+        settings[key] = value
     if args.profile_thread:
         settings["SOTC_PROFILE"] = args.profile_window
         settings["SOTC_PROFILE_THREAD"] = args.profile_thread
@@ -130,7 +145,7 @@ def main():
     environment.update(settings)
     with (binary / "sotc.exe").open("rb") as executable:
         binary_hash = hashlib.file_digest(executable, "sha256").hexdigest() if hasattr(hashlib, "file_digest") else hashlib.sha256(executable.read()).hexdigest()
-    (out / "settings.json").write_text(json.dumps({"variant": args.variant, "scene": args.scene, "executable_sha256": binary_hash, "settings": settings}, indent=2))
+    (out / "settings.json").write_text(json.dumps({"variant": args.variant, "scene": args.scene, "source_bin": str(source), "executable_sha256": binary_hash, "settings": settings}, indent=2))
     print("Capture:", out, flush=True)
     print("Keep the game visible; close it normally or let the time limit close its window.", flush=True)
     started = time.perf_counter()

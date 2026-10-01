@@ -1,5 +1,6 @@
 #include "sotc/watchdog.h"
 #include "sotc/log.h"
+#include "sotc/function_hooks.h"
 #include "ps2_runtime.h"
 #include "runtime/ee_scheduler.h"
 
@@ -29,6 +30,7 @@ namespace sotc::watchdog
     namespace
     {
         std::atomic<bool> g_running{false};
+        std::atomic<uint64_t> g_presentedFrames{0};
         std::thread g_thread;
         std::mutex g_symbolMutex;
         bool g_symbolsReady = false;
@@ -480,7 +482,7 @@ namespace sotc::watchdog
         const char *topValue = std::getenv("SOTC_PROFILE_TOP");
         const size_t top = topValue ? static_cast<size_t>(std::max(1, std::atoi(topValue))) : 30u;
         report("profile self", self, top);
-        report("profile self lines", selfLines, 30);
+        report("profile self lines", selfLines, top);
         report("profile inclusive", inclusive, 40);
         if (const char *focus = std::getenv("SOTC_PROFILE_FOCUS"))
         {
@@ -543,6 +545,7 @@ namespace sotc::watchdog
         uint64_t last = ~0ull;
         while (g_running.load())
         {
+            const uint64_t flips = g_presentedFrames.load(std::memory_order_relaxed);
             const uint64_t tick = g_runtime->memory().gs().vsyncTick.load();
             if (tick != last)
             {
@@ -554,7 +557,7 @@ namespace sotc::watchdog
                     std::memcpy(&value, rdram + (address & 0x1FFFFFFCu), sizeof(value));
                     std::fprintf(out, " %08x", value);
                 }
-                std::fprintf(out, "\n");
+                std::fprintf(out, " flips=%llu\n", static_cast<unsigned long long>(flips));
                 std::fflush(out);
             }
             std::this_thread::sleep_for(std::chrono::microseconds(500));
@@ -613,6 +616,9 @@ namespace sotc::watchdog
         if (const char *timeline = std::getenv("SOTC_TIMELINE"))
         {
             g_running.store(true);
+            FunctionHooks::instance().observeEntry(0x1C3070u, "timeline_present", [](uint8_t *, R5900Context *, PS2Runtime *) {
+                g_presentedFrames.fetch_add(1, std::memory_order_relaxed);
+            });
             std::thread(timelineLoop, std::string(timeline)).detach();
         }
         if (const char *profile = std::getenv("SOTC_PROFILE"))

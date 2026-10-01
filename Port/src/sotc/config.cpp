@@ -18,7 +18,7 @@ namespace sotc::config
             "PS2X_MEMCARD=1\n"
             "PS2X_INVERT_RIGHT_STICK=xy\n"
             "PS2X_MOUSE_SENSITIVITY=1.0\n"
-            "PS2X_MOUSE_VERTICAL_SENSITIVITY=1.5\n"
+            "PS2X_MOUSE_VERTICAL_SENSITIVITY=1.0\n"
             "PS2X_GS_GPU=1\n"
             "PS2X_GS_THREAD=1\n"
             "PS2X_MTVU=1\n"

@@ -13,6 +13,7 @@
 #include "sotc/idle_thread.h"
 #include "sotc/log.h"
 #include "sotc/module_guard.h"
+#include "sotc/mouse_camera.h"
 #include "sotc/window_icon.h"
 #include "sotc/watchdog.h"
 #include "sotc/hle/sce_fileio.h"
@@ -236,6 +237,7 @@ int main(int argc, char *argv[])
         sotc::hle::installLibgcc(runtime);
         sotc::installIdleThreadSkip(runtime);
         sotc::installDisplayMode(runtime);
+        sotc::installMouseCamera(runtime);
 #if SOTC_HAS_VU1_PROGRAMS
         registerGeneratedVu1Programs();
 #endif

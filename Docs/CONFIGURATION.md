@@ -8,7 +8,7 @@ The port creates `sotc.ini` beside `sotc.exe` on first launch. With `run.bat`, t
 PS2X_MEMCARD=1
 PS2X_INVERT_RIGHT_STICK=xy
 PS2X_MOUSE_SENSITIVITY=1.0
-PS2X_MOUSE_VERTICAL_SENSITIVITY=1.5
+PS2X_MOUSE_VERTICAL_SENSITIVITY=1.0
 PS2X_GS_GPU=1
 PS2X_GS_THREAD=1
 PS2X_MTVU=1
@@ -52,7 +52,19 @@ Click the game window to lock the cursor and move the camera with the mouse. Pre
 away from the window to release the cursor. `PS2X_MOUSE_SENSITIVITY` is a positive multiplier;
 increase it for faster camera movement or decrease it for slower movement. The right stick inversion
 setting applies to the mouse as well. `PS2X_MOUSE_VERTICAL_SENSITIVITY` adjusts vertical movement
-relative to horizontal movement; its default of `1.5` compensates for the game's slower pitch response.
+relative to horizontal movement; its default of `1.0` gives equal angular sensitivity on both axes.
+If an older INI file contains `PS2X_MOUSE_VERTICAL_SENSITIVITY=1.5`, change it to `1.0` for equal sensitivity.
+The free camera uses fixed yaw and pitch changes per mouse pixel. Horizontal movement preserves
+pitch, and diagonal movement uses the same sensitivity on both axes. Mouse deltas accumulate
+between game updates and are consumed once, without joystick acceleration, elevation-dependent
+speed scaling, or a frame-time multiplier. Mouse movement does not also drive the emulated right
+stick during free look. The original camera positions the view, handles collision and follows
+the character, while mouse control owns the final view direction and keeps the horizon level.
+Camera corrections do not change the mouse's stored angles. Pitch is limited to 85 degrees above
+or below the horizon without wrapping; reversing mouse direction moves away from either limit
+immediately. The default rotation is approximately 0.143 degrees per mouse pixel.
+Controller input, scripted cameras, and aiming modes use the original camera logic.
+Set `SOTC_NATIVE_MOUSE_CAMERA=0` to restore mouse-to-stick camera control.
 
 `PS2X_BIND_*` settings bind a keyboard key or mouse button to each PS2 button on controller 1.
 Square attacks with the left mouse button, Circle raises the sword with the right mouse button,

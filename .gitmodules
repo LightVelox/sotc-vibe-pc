@@ -1,3 +1,4 @@
 [submodule "External/PS2Recomp"]
 	path = External/PS2Recomp
-	url = https://github.com/ran-j/PS2Recomp
+	url = https://github.com/TaylorNAlbarnaz/PS2Recomp.git
+	branch = sotc-port

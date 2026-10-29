@@ -135,15 +135,24 @@ layer order.
 | M0 | Frame census and game-side map | This document |
 | M1 | Native backend in `gs_replay` at scale 1: texture cache, render targets, main-scene draws | Done: both recordings match the reference visually |
 | M2 | All passes of both recordings: render-target reads, shadows, blur chains, FB_ONLY, destination alpha, fog | Presented frames match the reference within a PSNR threshold |
-| M3 | In-game with `PS2X_GS_NATIVE=1`: presentation, savestates | Playable; scenario harness subset passes |
+| M3 | In-game with `PS2X_GS_NATIVE=1`: presentation, savestates | Done on Linux (see Status); scenario harness not yet run |
 | M4 | Internal resolution 2×–4× | Post-effect chains and HUD correct at each scale |
 | M5 | Coverage: recordings and census of every colossus fight, water, fur and death effects | No unknown GS features; gaps closed |
 | M6 | Layer 2: post effects and shadows at full resolution, then models | Per-effect switches, compared against layer 1 |
 
 ## Status
 
-M0 and M1 are done. `GSNativeBackend` (`External/PS2Recomp/ps2xRuntime/src/lib/gs/native/`) replays both recordings
-in `gs_replay`; it is not wired into the game yet.
+M0, M1 and M3 are done. `GSNativeBackend` (`External/PS2Recomp/ps2xRuntime/src/lib/gs/native/`) replays both
+recordings in `gs_replay` and runs the game with `PS2X_GS_NATIVE=1` (see `Docs/CONFIGURATION.md`).
+
+In the game on Linux, the window's context is created through EGL (a patch to raylib's GLFW platform, applied at
+configure time) and the native backend's context joins its share group. Each `Present` copies the displayed area at
+the internal resolution into a ring of three shared textures with fences (`GSSharedPresent`), which the window
+draws. A colossus cutscene from a savestate on a Radeon 680M runs at 52–56 game frames/s at 2×, against 51–58 with
+the GPU renderer at 1×. Savestates made under the native backend load back correctly, and the game boots to its
+menus. Two things made the CPU side fast enough: reusing the resolved draw state while consecutive primitives
+share it, and keeping decoded textures whose re-uploaded bytes did not change (the game re-uploads about 1 MB of
+textures every frame).
 
 | Recording | Presented frames vs the CPU reference | Replay time (CPU reference / native) |
 |---|---|---|

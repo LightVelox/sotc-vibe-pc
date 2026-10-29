@@ -221,3 +221,13 @@ leaves the emulator threads and process at normal priority.
 `PS2X_VU1_TIMING` defaults to `0` in the port: heavy scenes render as fast as the PC allows while the game clock
 still follows real time. Set `PS2X_VU1_TIMING=1` to make the EE wait for modelled VU1 time like a PS2 (heavy
 scenes then drop to 30 or 20 fps). `PS2X_GS_HW_LOG=1` logs hardware raster shader compiles and fallbacks.
+
+## Native GS renderer (experimental)
+
+`PS2X_GS_NATIVE=1` replaces GS emulation with native GPU rendering into render-target textures, at
+`PS2X_GS_NATIVE_SCALE` times the PS2 resolution (1–8, default 2). It takes precedence over `PS2X_GS_GPU`.
+On Linux the window's OpenGL context is then created through EGL and the GS worker shares textures
+with it, so frames reach the window at the internal resolution without a RAM copy. Elsewhere frames go
+through the PS2 display model at 1×. When PS2 memory holds a newer image than the GPU copy (an image
+uploaded straight to the display buffer), that frame is shown at 1×. The blur and glow effects are not yet adapted to higher scales, and the destination
+alpha test is not implemented. See [NATIVE_RENDERER.md](NATIVE_RENDERER.md).

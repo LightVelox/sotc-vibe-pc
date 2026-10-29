@@ -133,12 +133,41 @@ layer order.
 | | Milestone | Done when |
 |---|---|---|
 | M0 | Frame census and game-side map | This document |
-| M1 | Native backend in `gs_replay` at scale 1: texture cache, render targets, main-scene draws | The riding recording's main scene pass visibly matches the reference |
+| M1 | Native backend in `gs_replay` at scale 1: texture cache, render targets, main-scene draws | Done: both recordings match the reference visually |
 | M2 | All passes of both recordings: render-target reads, shadows, blur chains, FB_ONLY, destination alpha, fog | Presented frames match the reference within a PSNR threshold |
 | M3 | In-game with `PS2X_GS_NATIVE=1`: presentation, savestates | Playable; scenario harness subset passes |
 | M4 | Internal resolution 2×–4× | Post-effect chains and HUD correct at each scale |
 | M5 | Coverage: recordings and census of every colossus fight, water, fur and death effects | No unknown GS features; gaps closed |
 | M6 | Layer 2: post effects and shadows at full resolution, then models | Per-effect switches, compared against layer 1 |
+
+## Status
+
+M0 and M1 are done. `GSNativeBackend` (`External/PS2Recomp/ps2xRuntime/src/lib/gs/native/`) replays both recordings
+in `gs_replay`; it is not wired into the game yet.
+
+| Recording | Presented frames vs the CPU reference | Replay time (CPU reference / native) |
+|---|---|---|
+| Riding, 10 fields | mean 1.1–4.2 levels, max 68–133 | 1.61 s / 0.48 s |
+| Opening cutscene, 14 fields | mean 2.4–3.5 levels, max 12–30 | 2.29 s / 0.70 s |
+
+Per pass, copies and downsamples are exact and the shadow volumes differ in 0.1% of pixels. The remaining
+differences are rounding: GPU blending rounds where the GS truncates (`>> 7`), and bilinear weights differ slightly.
+In the riding scene they accumulate through an effect that feeds the previous frame back, which is why the mean
+grows from frame to frame. Rendering at 2× and 4× works, with post-effect chains not yet adapted (M4).
+
+Lessons from M1:
+
+- `GSCpuBackend` models the GS texture page cache, which serves a page's old bytes after a write until `TEXFLUSH`.
+  The native backend forwards `TEXFLUSH` and flushes that cache after writing targets back, or decoded textures
+  read stale bytes.
+- The game streams textures into memory that scratch targets (`150`, `178`) also use, mid-frame. Page ownership has
+  to come from the area actually drawn, not the scissor, and uploads take pages away from targets.
+- Shadow volumes add `+1`/`−1` per covered pixel with COLCLAMP off, wrapping modulo 256. Order-independent, so a
+  float accumulation folded back modulo 256 is exact.
+- GS point sampling takes `floor(u)`; texture coordinates on exact texel edges need a small bias.
+
+Not implemented yet: destination alpha test (448 draws per frame in these scenes), PABE, region clamp/repeat,
+FBMSK, local-to-local transfers out of GPU targets.
 
 ## Tools
 
@@ -147,4 +176,8 @@ layer order.
 - Dump: `gs_replay <recording.gsr> --text <dump.txt>`.
 - Census: `python3 Tools/gs_frame_census.py passes <dump.txt> [frames]` and
   `python3 Tools/gs_frame_census.py features <dump.txt>...`.
-- Compare: `gs_replay <recording.gsr> --compare-backends <a> <b> [--dump <dir>]`.
+- Compare presented frames: `gs_replay <recording.gsr> --compare-backends cpu native [--dump <dir>]`. Backends
+  `native2`…`native8` render at that scale; with `--dump`, `*_native<N>_full.png` shows the displayed buffer at the
+  internal resolution.
+- Compare pass by pass: `gs_replay <recording.gsr> --pass-diff cpu native <fields>`, with `GS_PASS_DUMP=<dir>` to write
+  images of the passes that diverge.

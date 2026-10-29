@@ -1,0 +1,150 @@
+# Native renderer
+
+Plan for replacing GS emulation with native GPU rendering. Today every renderer (CPU, GPU compute and GPU
+hardware raster) emulates the GS at the level of its 4 MB of swizzled VRAM at 512×448. A native renderer instead
+draws the game's primitives into ordinary GPU render targets and textures. That allows higher internal
+resolutions, removes the dependency on fragment-shader interlock (AMD on Linux uses the slow compute path today),
+presents frames without a RAM round trip, and is the groundwork for porting the renderer to other GPUs and
+consoles.
+
+This document records what the game draws, which GS features it relies on, the design, and the milestones. The
+findings come from two GS recordings (riding through the open field, and the opening cutscene), analysed with
+`Tools/gs_frame_census.py`, and from the game's symbol names in `Port/generated/`.
+
+## What a frame looks like
+
+The game runs at half the field rate, so a frame spans two fields and ends with a copy into the display buffer.
+Riding frame, 28,351 primitives (the cutscene frame has the same structure with 57,384):
+
+| # | Target (FBP, size) | Draws | What it is |
+|---|---|---|---|
+| 1 | `e0` 512×448, depth `70` | 2,342 | First scene pass covering the screen (background, distant terrain) |
+| 2 | `150` 256×256 | 8 | Downsampled copy of `e0` |
+| 3 | `e0` | 22,543 | Main scene: terrain, Wanda, Agro, plus fog sprites that read `150` |
+| 4 | `178` 512×448 | 2,424 | Shadow volumes: untextured, blended strips (`shadowDisp`) |
+| 5 | `e0` | 8 | Shadow composite: sprites reading `178` (`shadowDraw`) |
+| 6 | `e0`→`150`→`170`→`150`→`e0` | 56 | Down/upsample chain added back to the scene (glow) |
+| 7 | `150` 512×448 | 200 | Small textured object drawn into a cleared scratch buffer |
+| 8 | `150`→`1c0`→`1e0`→`1e8` and back to `e0` | 42 | Blur pyramid 256→128→64 (likely `depthOfField` / `feedbackBlur`) |
+| 9 | `150` 256×256, depth `170` | 187 | Low-resolution second scene render |
+| 10 | `170` | 128 | 128 offset copies of #9: radial blur for light shafts (`solarFlare`) |
+| 11 | `e0` | 13 | Sun glare in the upper right |
+| 12 | `1c0`…`1fe` | ~70 | Second blur with ±3 px taps |
+| 13 | `e0` | 262 | Full-screen tint, then overlays |
+| 14 | `0` 512×448, 24-bit | 1 | Copy of `e0` into the display buffer |
+
+Rows 6–12 are interpretations from the pass shapes and the effect function names; they are confirmed by
+toggling the effect functions in milestone 2. Each frame has about 2,200–2,400 runs of identical draw state,
+which is the number of GPU draw calls a native renderer needs.
+
+## GS features the game uses
+
+Counted over 563,531 primitives from both recordings:
+
+| Feature | Use | Native mapping |
+|---|---|---|
+| Blending | 6 equations: `(Cs−Cd)·As+Cd` 90%, `Cs·1.0+Cd` 10%, `Cs·As+Cd`, `(Cs−Cd)·Ad+Cd`, `(Cs−Cd)·1.0+Cd`, `Cd` | Fixed-function blending. PS2 alpha `0x80` is 1.0, so source alpha is scaled in the shader |
+| Alpha test | `A ≥ 64` with AFAIL=FB_ONLY 87%; NEVER with FB_ONLY 12% | FB_ONLY: draw passing pixels with depth writes, failing pixels without. NEVER+FB_ONLY is depth writes off |
+| Destination alpha test | 448 draws | Stencil built from the alpha bit |
+| Depth | Z24, GEQUAL or ALWAYS | GPU depth test GEQUAL on a 24-bit depth buffer |
+| Textures | 4-bit palettized (32-bit CLUT) 87%, 8-bit palettized 1%, 32/24-bit only for render-target reads | Decode once into RGBA8 textures, cached by VRAM page and CLUT |
+| Mipmaps | About a third of textured draws sample up to 3 levels (MXL=2, LOD from Q with a fixed K); the rest use one level | Upload the game's mip levels (MIPTBP1) and compute the GS LOD in the shader |
+| Render-target reads | Always the same layout: 32-bit read as 32-bit, or as 24-bit with alpha from TEXA | Bind the render target's GPU texture; for 24-bit reads replace alpha with TA0 |
+| Fog | Vertex fog on 77% of draws | Lerp to FOGCOL in the shader |
+| Minor | Dithering 43%, AA1 lines 1%, PABE 0.3%, color wrap instead of clamp 10% (additive passes) | Dither dropped at higher resolutions; the rest approximated |
+| Not used | FBMSK, FBA, region clamp/repeat, palette or depth reinterpretation of render targets, GS→EE readback | — |
+
+Everything maps onto ordinary GPU features. Nothing needs fragment-shader interlock or compute shaders.
+
+## Game-side rendering
+
+Mapped from the recompiled functions (`Port/generated/<name>_0x<address>.cpp`):
+
+- **Frame loop.** The scheduler thread runs `execScript` priority groups each frame: `graphFrameInit` (P1),
+  `DispDispObjGroupModel` for the scene (P9), `windowDraw` (P10), and `fadeScreen`, `drawDemoBar` and
+  `graphFrameFinish` (P11). `iFinish` resolves texture uploads (`texTransResolve`) and `iosGPFrameInit` flips and
+  sends the display list. The frame drawn is the one built in the previous iteration.
+- **Display list.** One VIF1 DMA chain per frame, made of 32 ordered layers (`iosDlPushLayer` /
+  `iosDlChainTailCurrent`); the layer index is the draw order. Geometry goes through VU1 (`XGKICK`), register
+  writes through VIF `DIRECT`.
+- **Models.** `modelDisp(DispModelClass*, matrices)` at `0x118C7F0` draws one model: it pushes its display-list
+  layers, selects VU1 microcode per layer (`transMicroCode`: 0 default, 1 reflection, 2 water, 5–9 shadow and skin
+  variants, 7 particles, `0xA` cloth) and requests its textures (`texTransRequest`). Terrain, characters and
+  colossi all go through it via `DispLayoutObjModel`.
+- **Effects.** Each effect is its own function with parameter getters: `shadowDisp`/`shadowDraw`,
+  `depthOfField`, `feedbackBlur`, `cameraBlur`/`screenBlur`, `solarFlare`, `zFog`, `reflectionBegin/End`,
+  `refractionBegin/End`, `waterRefractionBegin/End`, `bossDeathEffectBegin/End`, `screenBrightness`.
+- **2D.** `windowDraw`, `spriteDrawSprite*`, `kPrintf*`, `gsReg*`.
+
+## Design
+
+The renderer is built in two layers.
+
+### Layer 1: native GS backend
+
+A new `GSRasterBackend` (`GSNativeBackend`, selected with `PS2X_GS_NATIVE=1`) consumes the same primitive stream
+as the existing backends, so it covers the whole game without game-specific code:
+
+- **VRAM shadow.** Uploads are applied to a CPU copy of VRAM with the existing swizzle code. It feeds texture
+  decoding and savestates.
+- **Texture cache.** Keyed by TBP, TBW, PSM, size and CLUT; entries are invalidated when an upload or a render
+  target touches their pages. 4-bit and 8-bit textures are decoded to RGBA8 with their CLUT, including mip levels.
+- **Render targets.** GPU color textures keyed by FBP/FBW/PSM, and depth buffers keyed by ZBP, at an internal
+  scale factor. Rendering marks the covered VRAM pages as owned by the target. A texture read from those pages
+  binds the target's GPU texture instead of decoding VRAM. Uploads over owned pages end that ownership.
+- **Draw translation.** Consecutive primitives with the same state are batched into one draw. State maps to a
+  small set of pipeline variants: blend equation, depth test, alpha-test mode (including the FB_ONLY split),
+  destination-alpha stencil, fog, texture function and 24-bit read alpha. Positions subtract XYOFFSET and are
+  multiplied by the scale; sprites become two triangles.
+- **Present.** The display buffer's target is drawn straight to the window, without a RAM copy.
+- **Savestates and readback.** Render targets are downloaded into the VRAM shadow only when the runtime needs
+  VRAM (savestates, `SnapshotVram`, GS→EE transfers, which these scenes never use).
+
+The existing backends stay as references: `gs_replay` compares a native replay against them.
+
+### Layer 2: engine-level replacements
+
+Once layer 1 is correct, individual parts move up to the game level, using the hook API in
+`Port/src/sotc/function_hooks.h`:
+
+- Post effects (`depthOfField`, `feedbackBlur`, `solarFlare`, `screenBlur`, `zFog`) as native shaders at full
+  resolution, reading their parameters from the game's getters, instead of fixed 512×448 sprite chains.
+- Shadows (`shadowDisp`/`shadowDraw`) at full resolution.
+- Model drawing at `modelDisp`, decoding each model's VIF packets once into GPU buffers. This is the layer a port
+  to a different platform needs, because it no longer depends on VU1 output.
+
+The display-list layers are the composition boundary: anything not replaced keeps flowing through layer 1 in
+layer order.
+
+## Risks
+
+- **Coverage.** Two scenes were surveyed. Colossus fights (fur, water, the death effects) may use features not
+  seen yet, such as palette effects or depth reads. Every fight should be recorded and run through the census
+  before the renderer replaces the default.
+- **Upscaling.** The post-effect chains assume 512×448: half-texel offsets, ±3 px blur taps and 64-pixel
+  column sprites. At higher scales they need adjusting per chain, which is the motivation for layer 2.
+- **Rasterization rules.** GS coverage and texel-center rules differ slightly from GPU rules; small offsets are
+  expected at scale 1 and tolerated by the comparison thresholds.
+- **VRAM aliasing.** Scratch targets such as `150` reuse memory that also holds textures; the page-ownership
+  model has to end ownership precisely on uploads.
+
+## Milestones
+
+| | Milestone | Done when |
+|---|---|---|
+| M0 | Frame census and game-side map | This document |
+| M1 | Native backend in `gs_replay` at scale 1: texture cache, render targets, main-scene draws | The riding recording's main scene pass visibly matches the reference |
+| M2 | All passes of both recordings: render-target reads, shadows, blur chains, FB_ONLY, destination alpha, fog | Presented frames match the reference within a PSNR threshold |
+| M3 | In-game with `PS2X_GS_NATIVE=1`: presentation, savestates | Playable; scenario harness subset passes |
+| M4 | Internal resolution 2×–4× | Post-effect chains and HUD correct at each scale |
+| M5 | Coverage: recordings and census of every colossus fight, water, fur and death effects | No unknown GS features; gaps closed |
+| M6 | Layer 2: post effects and shadows at full resolution, then models | Per-effect switches, compared against layer 1 |
+
+## Tools
+
+- Record: `PS2X_GS_RECORD=first:count:file` (fields; see `Docs/PROGRESS.md`) while playing or from a savestate
+  loaded with `SOTC_DEBUG_SCRIPT="1:load:<state>"`.
+- Dump: `gs_replay <recording.gsr> --text <dump.txt>`.
+- Census: `python3 Tools/gs_frame_census.py passes <dump.txt> [frames]` and
+  `python3 Tools/gs_frame_census.py features <dump.txt>...`.
+- Compare: `gs_replay <recording.gsr> --compare-backends <a> <b> [--dump <dir>]`.

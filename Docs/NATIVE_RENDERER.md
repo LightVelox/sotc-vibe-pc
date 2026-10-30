@@ -45,13 +45,13 @@ Counted over 563,531 primitives from both recordings:
 |---|---|---|
 | Blending | 6 equations: `(Cs−Cd)·As+Cd` 90%, `Cs·1.0+Cd` 10%, `Cs·As+Cd`, `(Cs−Cd)·Ad+Cd`, `(Cs−Cd)·1.0+Cd`, `Cd` | Fixed-function blending. PS2 alpha `0x80` is 1.0, so source alpha is scaled in the shader |
 | Alpha test | `A ≥ 64` with AFAIL=FB_ONLY 87%; NEVER with FB_ONLY 12% | FB_ONLY: draw passing pixels with depth writes, failing pixels without. NEVER+FB_ONLY is depth writes off |
-| Destination alpha test | 448 draws | Stencil built from the alpha bit |
+| Destination alpha test | 448 draws | The shader reads the target's alpha bit at its own pixel |
 | Depth | Z24, GEQUAL or ALWAYS | GPU depth test GEQUAL on a 24-bit depth buffer |
 | Textures | 4-bit palettized (32-bit CLUT) 87%, 8-bit palettized 1%, 32/24-bit only for render-target reads | Decode once into RGBA8 textures, cached by VRAM page and CLUT |
 | Mipmaps | About a third of textured draws sample up to 3 levels (MXL=2, LOD from Q with a fixed K); the rest use one level | Upload the game's mip levels (MIPTBP1) and compute the GS LOD in the shader |
 | Render-target reads | Always the same layout: 32-bit read as 32-bit, or as 24-bit with alpha from TEXA | Bind the render target's GPU texture; for 24-bit reads replace alpha with TA0 |
 | Fog | Vertex fog on 77% of draws | Lerp to FOGCOL in the shader |
-| Minor | Dithering 43%, AA1 lines 1%, PABE 0.3%, color wrap instead of clamp 10% (additive passes) | Dither dropped at higher resolutions; the rest approximated |
+| Minor | Dithering 43%, AA1 lines 1%, PABE 0.3%, color wrap instead of clamp 10% (additive passes) | Dither dropped; PABE and color wrap blend in the shader; AA1 ignored |
 | Not used | FBMSK, FBA, region clamp/repeat, palette or depth reinterpretation of render targets, GS→EE readback | — |
 
 Everything maps onto ordinary GPU features. Nothing needs fragment-shader interlock or compute shaders.
@@ -94,7 +94,7 @@ as the existing backends, so it covers the whole game without game-specific code
   binds the target's GPU texture instead of decoding VRAM. Uploads over owned pages end that ownership.
 - **Draw translation.** Consecutive primitives with the same state are batched into one draw. State maps to a
   small set of pipeline variants: blend equation, depth test, alpha-test mode (including the FB_ONLY split),
-  destination-alpha stencil, fog, texture function and 24-bit read alpha. Positions subtract XYOFFSET and are
+  destination-alpha read, fog, texture function and 24-bit read alpha. Positions subtract XYOFFSET and are
   multiplied by the scale; sprites become two triangles.
 - **Present.** The display buffer's target is drawn straight to the window, without a RAM copy.
 - **Savestates and readback.** Render targets are downloaded into the VRAM shadow only when the runtime needs
@@ -134,7 +134,7 @@ layer order.
 |---|---|---|
 | M0 | Frame census and game-side map | This document |
 | M1 | Native backend in `gs_replay` at scale 1: texture cache, render targets, main-scene draws | Done: both recordings match the reference visually |
-| M2 | All passes of both recordings: render-target reads, shadows, blur chains, FB_ONLY, destination alpha, fog | Presented frames match the reference within a PSNR threshold |
+| M2 | All passes of both recordings: render-target reads, shadows, blur chains, FB_ONLY, destination alpha, fog | Done: all six recordings at least 43 dB PSNR at 1× (threshold 40 dB) |
 | M3 | In-game with `PS2X_GS_NATIVE=1`: presentation, savestates | Done on Linux (see Status); scenario harness not yet run |
 | M4 | Internal resolution 2×–4× | Post-effect chains and HUD correct at each scale |
 | M5 | Coverage: recordings and census of every colossus fight, water, fur and death effects | No unknown GS features; gaps closed |
@@ -142,7 +142,7 @@ layer order.
 
 ## Status
 
-M0, M1 and M3 are done. M6 has opt-in native passes for screen brightness and six post effects (see below);
+M0, M1, M2 and M3 are done. M6 has opt-in native passes for screen brightness and six post effects (see below);
 shadows and models remain pending.
 `GSNativeBackend` (`External/PS2Recomp/ps2xRuntime/src/lib/gs/native/`) replays both
 recordings in `gs_replay` and runs the game with `PS2X_GS_NATIVE=1` (see `Docs/CONFIGURATION.md`).
@@ -156,15 +156,8 @@ menus. Two things made the CPU side fast enough: reusing the resolved draw state
 share it, and keeping decoded textures whose re-uploaded bytes did not change (the game re-uploads about 1 MB of
 textures every frame).
 
-| Recording | Presented frames vs the CPU reference | Replay time (CPU reference / native) |
-|---|---|---|
-| Riding, 10 fields | mean 1.1–4.2 levels, max 68–133 | 1.61 s / 0.48 s |
-| Opening cutscene, 14 fields | mean 2.4–3.5 levels, max 12–30 | 2.29 s / 0.70 s |
-
-Per pass, copies and downsamples are exact and the shadow volumes differ in 0.1% of pixels. The remaining
-differences are rounding: GPU blending rounds where the GS truncates (`>> 7`), and bilinear weights differ slightly.
-In the riding scene they accumulate through an effect that feeds the previous frame back, which is why the mean
-grows from frame to frame. Rendering at 2× and 4× works, with post-effect chains not yet adapted (M4).
+Presented frames match the CPU reference at 1× above 40 dB PSNR in all six recordings (numbers and method under M2
+below). Rendering at 2× and 4× works, with post-effect chains not yet adapted (M4).
 
 Lessons from M1:
 
@@ -177,23 +170,103 @@ Lessons from M1:
   float accumulation folded back modulo 256 is exact.
 - GS point sampling takes `floor(u)`; texture coordinates on exact texel edges need a small bias.
 
-Not implemented yet: destination alpha test (448 draws per frame in these scenes), PABE, region repeat,
-FBMSK, local-to-local transfers out of GPU targets.
+Not implemented yet: alpha values above 0x80 in render targets (stored saturated at 0x80, see M2), dithering, AA1,
+16-bit render targets (drawn as 32-bit), and region repeat on render targets read at scales above 1×.
+
+### M2: all passes within a PSNR threshold
+
+Measured first: `--pass-diff` and the census showed that most of the difference came from blend rounding, not from
+missing features. In the riding scene the blur chains (`1e8`/`1fe`, 64×64) blend sprites at alpha 0x40, GPU blending
+rounds where the GS truncates, and the error is added back to the whole screen and fed into the next frame. In the
+opening cutscene about 1,000 fog-layer triangles per field (vertex alpha around 0x27, read of the `170` target)
+each rounded up instead of down, about 6 levels too bright in total. The 448 destination-alpha draws are the depth
+fog layers (32 sprites per frame, DATM=1, each layer clears bit 7 for the next); PABE is used by 110 refraction
+triangles per field in the cutscene. FBMSK, region repeat and local-to-local transfers do not occur in these
+recordings and are covered by synthetic checks only.
+
+What the native backend now does:
+
+- **Read-back draws.** The fragment shader can read the target at its own pixel (`texelFetch` on the attached
+  texture after `glTextureBarrier`). It then applies the destination alpha test (bit 7 of the stored alpha),
+  blends with the GS integer formula `((A − B) · C >> 7) + D` including PABE, COLCLAMP clamp or wrap and Ad,
+  and merges FBMSK bit masks. A draw is read back when it uses DATE, PABE or an FBMSK that is not whole channels,
+  or when it blends and the factor may be fractional: always for sprites, and for other primitives unless C is
+  FIX 0 or 0x80, or As is known to be 0 or 0x80 (equal vertex alphas, and a texture whose decoded alpha is only
+  0 and 0x80). Primitives of one batch whose interiors overlap (separating-axis test on a 16-pixel grid) start a
+  new segment of the same draw after another barrier, so each pixel is read and written once per draw and
+  batches are not split. A batch that samples its own target refreshes its copy per segment.
+  `PS2X_GS_NATIVE_EXACT_BLEND` selects 0 none, 1 sprites, 2 (default) as above, 3 every blended primitive.
+- **Whole-channel FBMSK** maps onto `glColorMask`.
+- **Texel-exact sampling.** Where the bound texture has the logical resolution (decoded textures, and render
+  targets at 1×) the shader fetches texels itself: wrap modes on integer coordinates, including region repeat
+  (`(u & MINU) | MAXU`), and bilinear weights computed and rounded like the reference, with sprite UVs rounded
+  to 1/16 texel. Render targets read at higher scales keep hardware sampling (region repeat there is drawn as
+  clamp).
+- **Depth** is rounded to Z24/Z16 steps in the shader (`gl_FragDepth`), so coplanar passes with GEQUAL behave like
+  the GS instead of z-fighting (refraction water in the cutscene). Gouraud color and fog are evaluated at the GS
+  sample point like the texture coordinates.
+- **Local-to-local transfers** write targets back, run the copy in PS2 memory and reload the written pages of every
+  live target from memory.
+- The brightness pass (M6) blends in the shader the same way.
+- Fixed while measuring: the first COLCLAMP=0 accumulation into a target copied the float buffer onto itself
+  (creating a framebuffer rebinds both read and draw), losing the target's previous contents.
+
+Presented frames against the CPU reference at 1×, Radeon 680M. The live recordings are replayed with
+`--original-effects` (layer 1 only; with the M6 effect tags the layer-2 passes still use GL blending). Mean and
+max are per field (absolute difference in levels), PSNR is the worst field, ">8" is the worst field's share of
+pixels more than 8 levels off. Replay time is `--backend native --no-compare`, best of 5.
+
+| Recording | Before M2: mean, max, PSNR, >8 | After: mean, max, PSNR, >8 | Replay 1× before / after | Replay 2× before / after |
+|---|---|---|---|---|
+| Riding (`ride.gsr`, 10 fields) | 1.14–4.20, 68–133, 32.9 dB, 32.0% | 0.01–0.41, 67–139, 47.8 dB, 0.09% | 0.29 / 0.32 s | 0.31 / 0.37 s |
+| Opening cutscene (`cut.gsr`, 14) | 2.38–3.49, 12–30, 35.5 dB, 0.16% | 0.51–1.19, 4–33, 44.0 dB, 0.01% | 0.40 / 0.48 s | 0.43 / 0.57 s |
+| Cutscene 2450 (`m6-effects-smoke/cut2`, 10) | 0.00–2.91, 0–22, 37.2 dB, 0.01% | 0.00–0.52, 0–16, 49.9 dB, 0.00% | 0.30 / 0.32 s | 0.35 / 0.40 s |
+| Field (`m6-effects-smoke/field2`, 8) | 1.89–4.98, 70–89, 33.1 dB, 11.9% | 0.05–0.93, 67–88, 43.9 dB, 0.30% | 0.29 / 0.32 s | 0.29 / 0.33 s |
+| Slow camera (`m6-effects-smoke/slow4`, 8) | 0.00–3.23, 0–76, 37.0 dB, 0.15% | 0.00–0.36, 0–74, 48.6 dB, 0.09% | 0.23 / 0.24 s | 0.25 / 0.27 s |
+| Depth of field forced (`m6-effects-forced`, 16) | 0.00–5.84, 0–139, 30.6 dB, 35.3% | 0.00–1.00, 0–139, 43.0 dB, 0.35% | 0.39 / 0.40 s | 0.41 / 0.50 s |
+
+`gs_replay <rec> --compare-backends cpu native --psnr-threshold 40` passes on all six. Replay cost of mode 2 is
+3–20% at 1× and up to about 30% at 2× (the cutscene draws about 1,500 read-back segments per field);
+mode 1 replays as fast as before M2 with PSNR 36.4 dB (cutscene) to 47.5 dB. At 2× the presented frames are compared
+after downsampling, so they are a sanity check: the mean in the riding scene fell from 3.4–5.7 to 2.9–3.0 levels and
+in the cutscene from 2.6–3.7 to 1.0–1.5.
+
+Remaining differences: triangle edges and tips (GL samples 1/32 pixel from the GS sample point; the maxima are
+isolated pixels, see the >8 column), perspective texture coordinates and Gouraud colors interpolated in a different order than
+the reference's float barycentrics (±1 level, and different texels where a texture is heavily minified), bilinear
+edges of 0/0x80 alpha textures on primitives that keep GL blending, and render-target alpha above 0x80, which is
+stored saturated (the representation that lets GL use DST_ALPHA as the GS's Ad). Mipmapping is not used by either
+backend. In the cutscene a fog layer drawn with Gouraud alpha still ends about 1.5 levels brighter than the
+reference after all layers; its cause was not found.
+
+Synthetic checks, each comparing native readback with `GSCpuBackend` (all pass on the Radeon 680M; each fails
+when its feature is disabled):
+
+- `--check-native-blend`: all 81 blend selector combinations with COLCLAMP clamp and wrap, overlapping sprites and
+  triangles, and fogged bilinear CT24 render-target reads; exact at 1×, sanity at 2×.
+- `--check-native-date`: layered DATM=1 sprites that clear bit 7, DATM=0, overlapping triangles; exact at 1×.
+- `--check-native-fbmsk`: whole-channel and bit masks with and without blending.
+- `--check-native-pabe`: overlapping sprites and triangles on both sides of alpha 0x80, four equations.
+- `--check-native-region-repeat`: region repeat on decoded textures and on a render target, nearest and bilinear.
+- `--check-native-local-copy`: a transfer between two live targets, then a blend over and a texture read of the
+  destination, at 1× and 2×.
+
+FBMSK and PABE allow 16 mismatching pixels: triangle tips the two rasterizers cover differently. All other checks
+are exact at 1×.
 
 ### Continuation (2026-10-29)
 
 Read the saved Claude sessions and resumed from the committed M3 implementation. Native texture sampling now
 honors region-clamp (`WMS/WMT=2`) MIN/MAX bounds within the decoded texture, including inverted bounds, and
-includes those bounds in the draw batching key. Region repeat (`WMS/WMT=3`) still warns and uses ordinary clamp.
-Bounds outside the decoded texture are not covered by this change.
+includes those bounds in the draw batching key. (Region repeat and bounds outside the decoded texture were
+added with M2, below.)
 
 `gs_replay --check-native-region-clamp` draws a synthetic atlas of 36 cases and compares readback with the CPU
 backend: U/V repeat, ordinary clamp and region clamp, nearest and bilinear filtering, and normal/inverted bounds.
 It requires a working native OpenGL context and fails instead of accepting CPU fallback. All cases match exactly
 on the Radeon 680M at 1×. Disabling the new region sampling makes the same test fail with 9,594
 channels outside tolerance (maximum error 96), confirming it detects the original bug. The riding and cutscene replays retain the documented CPU/native differences above;
-`--compare-backends` returns 1 because it checks exact equality, which this renderer does not yet achieve.
-M2, M4 and wider gameplay coverage remain unfinished; this change makes no new performance claim.
+`--compare-backends` returned 1 because it checks exact equality; it now also takes a PSNR threshold (M2).
 
 ## Tools
 
@@ -208,7 +281,14 @@ M2, M4 and wider gameplay coverage remain unfinished; this change makes no new p
 - Compare pass by pass: `gs_replay <recording.gsr> --pass-diff cpu native <fields>`, with `GS_PASS_DUMP=<dir>` to write
   images of the passes that diverge.
 
+- Compare against a threshold: `--compare-backends <a> <b> --psnr-threshold <dB>` prints PSNR and the share of pixels
+  more than 8 levels off per field, the minimum PSNR, and exits 1 when a field is below the threshold.
+- Find a diverging draw: `GS_PASS_DRAWS=<n>` ends a `--pass-diff` pass every n draws; `GS_PASS_DUMP_ALL=1` also dumps
+  passes that differ by at most 16 levels. `PS2X_GS_NATIVE_EFFECT_STATS=1` prints batch and read-back segment counts.
+
 - Synthetic region-clamp regression: `gs_replay --check-native-region-clamp` (requires GPU access).
+- Synthetic M2 checks: `--check-native-blend`, `--check-native-date`, `--check-native-fbmsk`, `--check-native-pabe`,
+  `--check-native-region-repeat`, `--check-native-local-copy` (see M2 in Status).
 
 ### M6 first effect: screen brightness (experimental)
 
@@ -219,8 +299,9 @@ alpha, emits into layer 30, and restores GS state. Only that draw is replaced: a
 frontend, recording wrapper and graphics worker. This avoids issuing GPU work while the EE is still building
 the next frame's display list. There is no persistent marker state or new savestate layout.
 
-The native backend draws a fullscreen triangle with a dedicated color shader and the game's blend factors,
-at the internal resolution, clipped to the original scissor. Prior draws are flushed first, later draws restore
+The native backend draws a fullscreen triangle with a dedicated shader that reads the target at each pixel and
+blends the game's color with the GS's integer rounding (since M2), at the internal resolution, clipped to the
+original scissor. Prior draws are flushed first, later draws restore
 their normal GL state, and target page ownership/writeback are updated. Only the known untextured, depth-independent
 brightness state covering the scissor is eligible. Other variants and other backends submit the original sprite.
 The switch defaults off. The neutral brightness value 8 emits no pass.
@@ -237,7 +318,7 @@ Validation on 2026-10-29 (Radeon 680M):
 
 - `--check-native-brightness`: 19 checks pass. Captured RGB is exact against layer 1 at 1×. At 2×/4×,
   interior differences are bounded by 2 levels from layer 1's interpolation/truncation of constant sprite
-  colors. Leading borders are tested against the brightness formula separately: layer 1's 15/32-pixel
+  colors. Leading borders are tested against the GS brightness formula (`(255 * alpha) >> 7`) separately: layer 1's 15/32-pixel
   coverage shift leaves a 1- or 2-pixel strip at these scales, while the new fullscreen pass covers it.
   Queue and fallback VRAM comparisons at 1× are exact, including alpha.
 - A live 2× run loads `field.state`, sets brightness to 4, executes the native pass, saves a private state,

@@ -23,6 +23,11 @@ written. Results: `<out>/report.md` and `report.json` (pass/fail and why, fields
 longest game-logic stall), `<out>/cNN/` (stdout, timeline, captures every `--every` fields) and `cNN_sheet.png`
 contact sheets. With `--jobs 2` the speed numbers are lower than in a single run.
 
+On Linux the harness runs `build/port/bin/sotc`, takes captures through `PS2X_SCREENSHOT_FIELDS` and closes the game
+with SIGTERM. Without the prefight state, colossus 1 also starts from `--state` (default
+`build/hlr-data/states/field.state`) with the warp. `--exe` picks another executable and `--env NAME=VALUE` adds
+environment variables, for example `--env PS2X_GS_NATIVE=1 --env PS2X_GS_NATIVE_SCALE=2` to test the native renderer.
+
 Checks per run: process crash or missing guest branch target, no field progress for 60 s (stall), the game's
 scheduler frame counter (`0x1DC9EC`) not advancing for more than 300 fields while VBlanks continue (the game froze),
 more than half of the fight captures black, no colossus object at kill time, and the colossus's dead flag not set

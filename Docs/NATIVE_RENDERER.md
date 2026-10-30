@@ -122,7 +122,8 @@ layer order.
   seen yet, such as palette effects or depth reads. Every fight should be recorded and run through the census
   before the renderer replaces the default.
 - **Upscaling.** The post-effect chains assume 512×448: half-texel offsets, ±3 px blur taps and 64-pixel
-  column sprites. At higher scales they need adjusting per chain, which is the motivation for layer 2.
+  column sprites. At higher scales they need adjusting per chain, which is the motivation for layer 2. (M4 handles
+  them in layer 1 with general rules: whole-pixel sprites, 1× blur buffers, scaled-buffer reads in the shader.)
 - **Rasterization rules.** GS coverage and texel-center rules differ slightly from GPU rules; small offsets are
   expected at scale 1 and tolerated by the comparison thresholds.
 - **VRAM aliasing.** Scratch targets such as `150` reuse memory that also holds textures; the page-ownership
@@ -136,13 +137,13 @@ layer order.
 | M1 | Native backend in `gs_replay` at scale 1: texture cache, render targets, main-scene draws | Done: both recordings match the reference visually |
 | M2 | All passes of both recordings: render-target reads, shadows, blur chains, FB_ONLY, destination alpha, fog | Done: all six recordings at least 43 dB PSNR at 1× (threshold 40 dB) |
 | M3 | In-game with `PS2X_GS_NATIVE=1`: presentation, savestates | Done on Linux (see Status); scenario harness not yet run |
-| M4 | Internal resolution 2×–4× | Post-effect chains and HUD correct at each scale |
+| M4 | Internal resolution 2×–4× | Done: post-effect chains and HUD line up with 1× at 2×, 3× and 4× (see M4 below) |
 | M5 | Coverage: recordings and census of every colossus fight, water, fur and death effects | No unknown GS features; gaps closed |
 | M6 | Layer 2: post effects and shadows at full resolution, then models | Per-effect switches, compared against layer 1 |
 
 ## Status
 
-M0, M1, M2 and M3 are done. M6 has opt-in native passes for screen brightness and six post effects (see below);
+M0, M1, M2, M3 and M4 are done. M6 has opt-in native passes for screen brightness and six post effects (see below);
 shadows and models remain pending.
 `GSNativeBackend` (`External/PS2Recomp/ps2xRuntime/src/lib/gs/native/`) replays both
 recordings in `gs_replay` and runs the game with `PS2X_GS_NATIVE=1` (see `Docs/CONFIGURATION.md`).
@@ -157,7 +158,7 @@ share it, and keeping decoded textures whose re-uploaded bytes did not change (t
 textures every frame).
 
 Presented frames match the CPU reference at 1× above 40 dB PSNR in all six recordings (numbers and method under M2
-below). Rendering at 2× and 4× works, with post-effect chains not yet adapted (M4).
+below). At 2×–4× the post-effect chains and the HUD line up with the 1× image (M4 below).
 
 Lessons from M1:
 
@@ -171,7 +172,7 @@ Lessons from M1:
 - GS point sampling takes `floor(u)`; texture coordinates on exact texel edges need a small bias.
 
 Not implemented yet: alpha values above 0x80 in render targets (stored saturated at 0x80, see M2), dithering, AA1,
-16-bit render targets (drawn as 32-bit), and region repeat on render targets read at scales above 1×.
+and 16-bit render targets (drawn as 32-bit).
 
 ### M2: all passes within a PSNR threshold
 
@@ -268,6 +269,126 @@ on the Radeon 680M at 1×. Disabling the new region sampling makes the same test
 channels outside tolerance (maximum error 96), confirming it detects the original bug. The riding and cutscene replays retain the documented CPU/native differences above;
 `--compare-backends` returned 1 because it checks exact equality; it now also takes a PSNR threshold (M2).
 
+### M4: internal resolution 2×–4×
+
+Measured first. `gs_replay --compare-backends` with a backend above 1× now compares the displayed buffer as the
+window shows it (without the CRTC merge), box-filtered to 512×448, and no longer calls `Present` on that backend:
+`Present` wrote the targets back into PS2 memory every field, so the next frame's reads of those buffers came from 1×
+copies. Besides PSNR it prints a low-pass PSNR (differences of 4×4 block means: blind to edge aliasing, sensitive to
+intensity and placement errors of more than a pixel or two) and a sample PSNR (only the stored pixel at each GS
+pixel's sample point, which renders what 1× renders unless a pass reads a scaled buffer at a fractional position).
+`--pass-diff` against `native<N>` locates the passes.
+
+What was wrong:
+
+- **Pixel mapping.** Vertices were moved by 0.5 − 1/32 of a GS pixel at every scale, so stored pixel j of an N×
+  buffer sampled the GS position (j + 0.5)/N − 0.5, centered on the GS sample point. A sprite from x0 to x1 then
+  covered half of GS pixel x0 and half of x1: full-screen passes never wrote the first stored row and column of a
+  buffer (a dark line along the top and left of the frame, and stale pixels fed into the blur chains), and the
+  half-pixel-offset sprites of the upsampling passes (−0.5 to 127.5) left the last stored row and column stale. A
+  nearest copy whose texture coordinates equal the position (the final copy `e0` → `0`) read half of every pixel from
+  its neighbor: each such pass moved the image by half a GS pixel. In the riding scene at 2× the copy doubled the
+  difference to 1× (mean 1.7 → 3.6 levels in `--pass-diff`).
+- **Blur extent.** The glow, blur and depth-of-field chains downsample into 256-, 128- and 64-pixel-wide buffers
+  (`150`, `170`, `1c0`, `1e0`, `1e8`, `1fe`) and upsample back. At N× those buffers had N times the resolution, so
+  every blur spread over N times fewer screen pixels.
+- **Render-target reads above 1×** used GL's sampler on the scaled texture: `GL_REPEAT` over the buffer's size instead
+  of the texture's, and region repeat drawn as clamp.
+- **Write-back** above 1× was a bilinear blit, so PS2 memory (savestates, `--pass-diff`, textures decoded from a
+  buffer's pages) held a resampled image rather than the GS samples.
+
+What the backend does now (`gs_native_backend.cpp`; nothing game-specific):
+
+- Stored pixel j of a buffer at scale N samples the GS position j/N: vertices move by (0.5 − 1/32)/N, the same shift
+  as before at 1×. GS pixel x covers the positions [x, x + 1), and its top-left stored pixel holds exactly what 1×
+  renders there. Attributes keep the 1/32-stored-pixel correction.
+- Sprites cover whole GS pixels: their edges move to the boundaries of the pixels whose sample points they contain
+  (`ceil`), and their texture coordinates are extended along the same slope, in the normal path and in the M6 image
+  passes.
+- Buffers narrower than 512 pixels stay at 1× (`PS2X_GS_NATIVE_SCALE_MIN_WIDTH`, see `Docs/CONFIGURATION.md`); depth
+  buffers follow their frame buffer. In the game that keeps every blur buffer at 1× and scales `e0`, `0`, `178`
+  (shadow volumes) and the 512-wide use of `150`. The chains then run as at 1× (the downsampling passes read `e0` at
+  the GS sample points) and are added back into the scaled `e0` with the game's bilinear upsampling.
+- Scaled buffers are read in the shader at their own resolution: GS texel k is stored at N·k + sub, at positions
+  k + sub/N. Nearest takes the stored texel containing the coordinate; bilinear interpolates between the stored
+  texels around coordinate − 0.5. Wrap modes act on the GS texel and keep the sub-texel: repeat over the texture size,
+  clamp, region clamp and region repeat.
+- Nearest-sampled sprites show in each GS pixel the texel the GS picks at its sample point, and spread the pixel's
+  stored pixels within that texel (over several texels when minified). Without this, sprites with half-texel offsets
+  (the HUD frames sample at u = k + 0.5) would put texel boundaries in the middle of GS pixels under the new mapping.
+  HUD elements look like the 1× image scaled up, and a nearest copy between scaled buffers copies every stored pixel.
+- Lines and points are N stored pixels wide and centered on the GS pixels they cover.
+- Write-back above 1× copies the top-left stored pixel of each GS pixel, so memory holds the 1× samples.
+
+Presented frames, native N× against native 1× (box-filtered; "sample" is the sample PSNR), Radeon 680M. Before and
+after are mean absolute difference (levels), minimum PSNR and minimum low-pass PSNR over the recording's fields; the
+minimum sample PSNR is after M4. The four live recordings are replayed with `--original-effects`:
+
+| Recording | 2× before → after | 3× before → after | 4× before → after | Sample 2× / 3× / 4× |
+|---|---|---|---|---|
+| Riding (`ride.gsr`) | 3.63, 30.4, 38.7 → 1.90, 34.3, 44.1 | 2.57, 33.0, 42.3 → 2.32, 33.0, 42.6 | 3.50, 30.8, 39.7 → 2.54, 32.4, 41.8 | 47.0 / 46.9 / 46.2 |
+| Opening cutscene (`cut.gsr`) | 0.92, 37.3, 44.0 → 0.42, 47.5, 58.9 | 0.67, 40.5, 47.4 → 0.49, 46.4, 58.2 | 0.89, 37.4, 44.0 → 0.52, 45.9, 57.6 | 63.2 / 62.3 / 62.3 |
+| Cutscene 2450 (`cut2`) | 0.57, 38.6, 44.7 → 0.21, 50.1, 60.2 | 0.37, 42.0, 48.0 → 0.26, 48.9, 58.5 | 0.56, 38.7, 44.7 → 0.27, 48.5, 58.2 | 54.1 / 51.8 / 50.6 |
+| Field (`field2`) | 7.10, 26.3, 36.0 → 3.68, 29.8, 40.3 | 5.35, 28.6, 39.1 → 4.25, 28.7, 39.4 | 6.79, 26.9, 37.0 → 4.53, 28.3, 38.8 | 42.0 / 42.2 / 41.4 |
+| Slow camera (`slow4`) | 2.95, 31.6, 39.7 → 1.13, 35.5, 45.6 | 1.86, 34.1, 43.7 → 1.37, 34.2, 44.0 | 2.88, 32.0, 40.9 → 1.50, 33.6, 43.2 | 48.3 / 48.4 / 47.7 |
+| Depth of field forced (`m6-effects-forced`) | 8.20, 25.0, 34.2 → 4.65, 28.9, 39.1 | 6.03, 27.3, 37.4 → 5.30, 27.8, 38.1 | 7.81, 25.5, 35.1 → 5.63, 27.3, 37.5 | 40.4 / 40.7 / 40.0 |
+
+Before M4, 3× looked better than 2× and 4× because at odd scales the centered mapping has a stored pixel on the GS
+sample point. What remains is the higher resolution itself: the field and riding scenes are dominated by minified
+ground textures, which alias differently at each resolution (neither backend uses mipmaps), and 3D geometry, sampled
+over [x, x + 1) instead of at x, sits on average (N − 1)/2N of a pixel up and left of the 1× image, consistently with
+every effect computed from it. With all buffers scaled (`PS2X_GS_NATIVE_SCALE_MIN_WIDTH=0`) the low-pass PSNR is
+0.3–0.7 dB lower (riding 2×: 43.5 dB, forced depth of field 2×: 38.6 dB), and at 4× the depth-of-field blur on the
+distant cliffs of the forced recording almost disappears, where the default keeps the 1× blur. The M6 tagged replays
+(`cut2`, `field2`, `slow4`, `forced` with their effect tags) give the same numbers within 0.5 dB. Two fight
+recordings from M5 (colossus 3 and 4) and a fight with the HUD shown (colossus 1, R1 held: health bar, stamina
+circle and grip bar, recorded at 4×) measure 1.0–2.7 levels, low-pass 40.9–48.5 dB at 2× and 4×, and pass the 40 dB
+threshold against the CPU reference at 1×.
+
+Inspected at 2× and 4× against the 1× frame scaled up (crops of `--dump` output): tree glow and sky in the riding
+scene (no line at the top and left edges, no doubled branches), the distant depth-of-field blur and the "Press △ to
+Jump" message in the forced recording, the sun-lit cliff and fog in `field2`, and the colossus 1 HUD: the health bar
+frame lines up with the 1× image row for row (before M4 a dark line ran along the top and left screen edges above
+it), and the stamina circle and grip bar are smooth, without gaps or offsets.
+
+At 1× nothing changed: presented frames of the riding, forced and `cut2` (tagged) replays are byte-identical to the
+M2 build, and the six recordings keep the M2 PSNRs against the CPU reference.
+
+Checks (all pass):
+
+- `--check-native-scale` (new): sprites from a decoded texture (nearest, bilinear at texel centers, half-pixel
+  offsets), a Gouraud triangle, a nearest copy and a region-repeat read between scaled buffers, a point-sampled
+  downsample into a 128-pixel buffer and the half-pixel upsample back, drawn at 1× and at 2×, 3×, 4×. Sample points
+  must match 1× (8 triangle-edge pixels allowed; Gouraud colors and what is computed from them within 2 levels),
+  nearest and untextured sprites must fill
+  whole GS pixels, the copy must reproduce every stored pixel, and the narrow buffer must stay at 1×. It fails with
+  the old vertex shift, without the nearest-sprite rule, and with `PS2X_GS_NATIVE_SCALE_MIN_WIDTH=0`.
+- `--check-native-blend`, `--check-native-date` and `--check-native-local-copy` at 2× scale their 128- and
+  256-pixel buffers (the checks set `PS2X_GS_NATIVE_SCALE_MIN_WIDTH=0`) and compare exactly instead of as a sanity
+  check, since write-back keeps the sample points: the blend cells and the local copy are exact, DATE has at most 16
+  triangle-edge pixels. The bilinear reads of a scaled buffer in the blend check show the
+  finer resolution and are not compared at 2×.
+- `--check-native-brightness` and `--check-native-post-effects` compare whole images at 2× and 4×; they used to skip
+  the one- or two-pixel leading border that layer 1 left unwritten.
+
+Replay time (`--backend native<N> --no-compare`, best of 5) is unchanged within noise at every scale; M2 build / M4
+build, in seconds:
+
+| Recording | 1× | 2× | 3× | 4× |
+|---|---|---|---|---|
+| Riding | 0.31 / 0.32 | 0.33 / 0.34 | 0.47 / 0.47 | 0.57 / 0.56 |
+| Opening cutscene | 0.45 / 0.43 | 0.58 / 0.58 | 0.74 / 0.78 | 1.02 / 1.04 |
+| Cutscene 2450 | 0.31 / 0.34 | 0.42 / 0.40 | 0.51 / 0.51 | 0.68 / 0.66 |
+| Field | 0.30 / 0.30 | 0.35 / 0.36 | 0.42 / 0.41 | 0.49 / 0.51 |
+| Slow camera | 0.24 / 0.25 | 0.28 / 0.28 | 0.30 / 0.32 | 0.39 / 0.37 |
+| Depth of field forced | 0.45 / 0.42 | 0.46 / 0.48 | 0.57 / 0.57 | 0.76 / 0.73 |
+
+Not covered: depth of field and feedback blur through the M6 tagged path (no recording reaches it, as before), the
+scenario harness, and the platforms that present through PS2 memory, where `Present` still writes the targets back
+every frame (reads of the previous frame then come from the 1× copy). Two native backends in one process (as in
+`--compare-backends native native4`) share whichever GL context was created last; this works because both create
+the same objects in the same order, and `--check-native-scale` renders its scales one after the other.
+
 ## Tools
 
 - Record: `PS2X_GS_RECORD=first:count:file` (fields; see `Docs/PROGRESS.md`) while playing or from a savestate
@@ -277,7 +398,8 @@ channels outside tolerance (maximum error 96), confirming it detects the origina
   `python3 Tools/gs_frame_census.py features <dump.txt>...`.
 - Compare presented frames: `gs_replay <recording.gsr> --compare-backends cpu native [--dump <dir>]`. Backends
   `native2`…`native8` render at that scale; with `--dump`, `*_native<N>_full.png` shows the displayed buffer at the
-  internal resolution.
+  internal resolution. With a backend above 1× both sides are compared as displayed (no CRTC merge), box-filtered to
+  the logical resolution, with low-pass and sample PSNR (see M4).
 - Compare pass by pass: `gs_replay <recording.gsr> --pass-diff cpu native <fields>`, with `GS_PASS_DUMP=<dir>` to write
   images of the passes that diverge.
 
@@ -289,6 +411,7 @@ channels outside tolerance (maximum error 96), confirming it detects the origina
 - Synthetic region-clamp regression: `gs_replay --check-native-region-clamp` (requires GPU access).
 - Synthetic M2 checks: `--check-native-blend`, `--check-native-date`, `--check-native-fbmsk`, `--check-native-pabe`,
   `--check-native-region-repeat`, `--check-native-local-copy` (see M2 in Status).
+- Synthetic M4 check: `--check-native-scale` (see M4).
 
 ### M6 first effect: screen brightness (experimental)
 

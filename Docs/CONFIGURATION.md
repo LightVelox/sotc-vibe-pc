@@ -229,8 +229,10 @@ scenes then drop to 30 or 20 fps). `PS2X_GS_HW_LOG=1` logs hardware raster shade
 On Linux the window's OpenGL context is then created through EGL and the GS worker shares textures
 with it, so frames reach the window at the internal resolution without a RAM copy. Elsewhere frames go
 through the PS2 display model at 1×. When PS2 memory holds a newer image than the GPU copy (an image
-uploaded straight to the display buffer), that frame is shown at 1×. The blur and glow effects are not yet adapted to
-higher scales. See [NATIVE_RENDERER.md](NATIVE_RENDERER.md).
+uploaded straight to the display buffer), that frame is shown at 1×. Buffers narrower than
+`PS2X_GS_NATIVE_SCALE_MIN_WIDTH` pixels (default 512) stay at 1×: the game's blur, glow and depth-of-field chains
+downsample into such buffers, and keeping them at 1× keeps those effects as wide and as strong as at 1×. `0` scales
+every buffer (effects then spread over fewer screen pixels). See [NATIVE_RENDERER.md](NATIVE_RENDERER.md).
 
 `PS2X_GS_NATIVE_EXACT_BLEND` selects which blended draws blend in the shader with the GS's integer rounding instead
 of GL blending: `0` none (destination alpha test, PABE and bit masks still do), `1` sprites, `2` (default) also

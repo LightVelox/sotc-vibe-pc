@@ -136,14 +136,14 @@ layer order.
 | M0 | Frame census and game-side map | This document |
 | M1 | Native backend in `gs_replay` at scale 1: texture cache, render targets, main-scene draws | Done: both recordings match the reference visually |
 | M2 | All passes of both recordings: render-target reads, shadows, blur chains, FB_ONLY, destination alpha, fog | Done: all six recordings at least 43 dB PSNR at 1× (threshold 40 dB) |
-| M3 | In-game with `PS2X_GS_NATIVE=1`: presentation, savestates | Done on Linux (see Status); scenario harness not yet run |
+| M3 | In-game with `PS2X_GS_NATIVE=1`: presentation, savestates | Done on Linux (see Status); scenario harness 16/16 (see M5) |
 | M4 | Internal resolution 2×–4× | Done: post-effect chains and HUD line up with 1× at 2×, 3× and 4× (see M4 below) |
-| M5 | Coverage: recordings and census of every colossus fight, water, fur and death effects | No unknown GS features; gaps closed |
+| M5 | Coverage: recordings and census of every colossus fight, water, fur and death effects | Done: 40 recordings, no unmapped GS features; all above 46.8 dB after the reference interpolation fix (see M5) |
 | M6 | Layer 2: post effects and shadows at full resolution, then models | Per-effect switches, compared against layer 1 |
 
 ## Status
 
-M0, M1, M2, M3 and M4 are done. M6 has opt-in native passes for screen brightness and six post effects (see below);
+M0 to M5 are done. M6 has opt-in native passes for screen brightness and six post effects (see below);
 shadows and models remain pending.
 `GSNativeBackend` (`External/PS2Recomp/ps2xRuntime/src/lib/gs/native/`) replays both
 recordings in `gs_replay` and runs the game with `PS2X_GS_NATIVE=1` (see `Docs/CONFIGURATION.md`).
@@ -238,7 +238,7 @@ the reference's float barycentrics (±1 level, and different texels where a text
 edges of 0/0x80 alpha textures on primitives that keep GL blending, and render-target alpha above 0x80, which is
 stored saturated (the representation that lets GL use DST_ALPHA as the GS's Ad). Mipmapping is not used by either
 backend. In the cutscene a fog layer drawn with Gouraud alpha still ends about 1.5 levels brighter than the
-reference after all layers; its cause was not found.
+reference after all layers; the cause was in the reference (fixed in M5, below).
 
 Synthetic checks, each comparing native readback with `GSCpuBackend` (all pass on the Radeon 680M; each fails
 when its feature is disabled):
@@ -389,6 +389,97 @@ every frame (reads of the previous frame then come from the 1× copy). Two nativ
 `--compare-backends native native4`) share whichever GL context was created last; this works because both create
 the same objects in the same order, and `--check-native-scale` renders its scales one after the other.
 
+### M5: coverage of the colossus fights
+
+Details, commands and per-recording data are in `build/runs/m5/REPORT.md` (Radeon 680M).
+
+- Scenario harness (`Tools/scenario.py colossi`, `PS2X_GS_NATIVE=1` at 2×): 16/16 pass (every colossus killed and
+  marked dead, no crash or hang, logic stalls of at most 8 fields). The default renderer passed 15/16; c04 aborted with an
+  amdgpu GPU hang during the death sequence and passed when rerun alone. With two instances at once native 2× averaged
+  14.8 game frames/s against 22.9 for the default renderer at 1× (c04 alone: 18.3 against 22.7).
+- 40 live recordings under `PS2X_GS_NATIVE=1`: both fight windows of all 16 colossi and 8 windows of two death
+  sequences (c02 on land, c07 in water); water in c07, c12 and the c07 death, fur close-ups in c06 and the c02 death. The
+  census found no GS feature the native backend does not map, and no `[gs-native]` warnings. Features not in the
+  earlier recordings, all covered: `(0−Cs)·As+Cd`, `(Cs−Cs)·FIX+Cd`, `(Cs−Cd)·FIX+Cd` with FIX changing per frame,
+  DECAL with TCC 1, AFAIL=KEEP, GEQUAL with ZMSK=1, region repeat on decoded textures, MMIN=2.
+- Remaining gaps: mipmaps (MXL=1, MMIN=3 in c04, 4,110 and 9,393 draws) are drawn from level 0 by both backends, so the
+  comparison cannot see them; a CT24 target read as CT32 (4–5 draws in c16 and the c07 death; the GS keeps alpha under
+  CT24 writes, native stores the shader's alpha) is unverified, with no visible effect; AA1 and DTHE are not
+  implemented and occur in every fight; a native shutdown segfault (exit −11) after the last frame in 2 of about 75
+  runs, not reproduced in 4 reruns.
+
+Accuracy: 38/40 recordings passed `--compare-backends cpu native --psnr-threshold 40`; c04_b (39.49 dB) and
+death_c07_0240 (39.67 dB) failed. In those and in the other low recordings one late `e0` pass of stacked low-alpha
+layers ended 1–2 levels brighter in native: large fogged triangle fans of 4-bit textures, MODULATE, vertex alpha 0–11,
+blended additively or with `(Cs−Cd)·As+Cd`, hundreds of layers per pass. The same as the cutscene fog layer of M2.
+
+Cause: the reference, not native. `GSCpuBackend`, the GPU emulation (the default renderer, which mirrors it) and
+`GSReferenceBackend` interpolated triangle attributes as `a0·w0 + a1·w1 + a2·w2` in float. When the three vertices
+have the same value the sum can land just below it (5.9999995 for alpha 6), and the truncation takes one level less on
+part of the pixels: alpha 5 instead of 6 drops a sixth of the layer, fog 67 instead of 68 adds fog color. The GS DDA
+keeps an attribute that is equal at all vertices exact (zero gradient), and so does GL's interpolation in native. Over
+dozens of layers the reference lost 1–2 levels.
+
+Fix: attributes are interpolated relative to vertex 0, `a0 + (a1 − a0)·w1 + (a2 − a0)·w2` (`gsTriangleLerp` in
+`gs_triangle_rules.h`), for color, alpha, fog, UV and STQ, in `GSCpuBackend` (fast and per-pixel paths), the GPU
+emulation shader and `GSReferenceBackend`. Lines already did this; sprites use the last vertex. The native backend is
+unchanged. The GPU emulation now matches `GSCpuBackend` almost exactly (`--compare-backends cpu gpu`: riding 53.7 →
+81.6 dB, cutscene 49.2 → 88.2 dB, forced depth of field 51.1 → 80.0 dB, mean 0.17–0.42 → 0.000 levels), so most of
+their historical raster differences were this. `--lockstep` (cpu against ref) passes on the riding recording.
+
+`gs_replay --check-native-fog-layers` draws 48 layers of such a quad (two triangles, bilinear 4-bit CLUT texture with
+alpha 0–0x80, magnified, slight perspective, fog 68–115, vertex alpha 5–6) over a background in eight variants: as the
+game, `(Cs−Cd)·As+Cd`, no fog, nearest, UV coordinates, untextured, flat shading, vertex alpha 0x80. It requires a mean
+native − cpu difference of at most 0.05 levels in every variant and at most 16 channels off by more than one level
+except in the nearest and UV variants (where a coordinate within float rounding of a texel edge may pick the other
+texel). With the old interpolation it fails in seven variants (means of +0.2 to +1.06 levels in six of them, and
+the flat variant through its fog); now the means are within ±0.013.
+
+Presented frames against the CPU reference at 1× (minimum PSNR over the fields; mean absolute difference):
+
+| Recording | Before | After |
+|---|---|---|
+| Riding (`ride.gsr`) | 47.84 dB, 0.371 | 50.52 dB, 0.026 |
+| Opening cutscene (`cut.gsr`) | 44.03 dB, 0.735 | 63.90 dB, 0.006 |
+| Cutscene 2450 (`cut2`, `--original-effects`) | 49.88 dB, 0.341 | 68.69 dB, 0.003 |
+| Field (`field2`, `--original-effects`) | 43.89 dB, 0.599 | 46.35 dB, 0.088 |
+| Slow camera (`slow4`, `--original-effects`) | 48.60 dB, 0.225 | 51.37 dB, 0.016 |
+| Depth of field forced (`--original-effects`) | 43.03 dB, 0.808 | 45.19 dB, 0.121 |
+
+All 40 M5 recordings now pass, the lowest at 46.80 dB (minimum PSNR, fight a / fight b, before → after):
+
+| Colossus | Before | After | Colossus | Before | After |
+|---|---|---|---|---|---|
+| c01 | 51.38 / 52.88 | 53.33 / 55.55 | c09 | 52.55 / 48.09 | 57.78 / 53.30 |
+| c02 | 45.21 / 44.78 | 49.01 / 47.84 | c10 | 45.06 / 43.16 | 49.86 / 48.29 |
+| c03 | 47.08 / 47.75 | 48.45 / 49.37 | c11 | 51.23 / 49.24 | 57.40 / 52.01 |
+| c04 | 40.44 / 39.49 | 47.79 / 47.19 | c12 | 47.33 / 43.56 | 53.25 / 52.44 |
+| c05 | 53.06 / 48.08 | 56.96 / 53.96 | c13 | 47.25 / 44.99 | 53.18 / 49.98 |
+| c06 | 43.63 / 44.49 | 64.75 / 51.17 | c14 | 49.85 / 49.33 | 54.76 / 52.53 |
+| c07 | 40.52 / 43.95 | 54.33 / 56.45 | c15 | 49.54 / 52.37 | 56.00 / 57.20 |
+| c08 | 48.84 / 48.93 | 51.28 / 51.46 | c16 | 49.79 / 46.49 | 56.16 / 52.15 |
+
+Death windows: c02 0120/0660/1630/2060 = 47.00/46.80/44.87/46.52 → 47.85/49.36/46.80/47.63 dB; c07
+0240/0480/0780/1200 = 39.67/42.18/49.26/49.20 → 56.73/59.83/60.80/66.19 dB. Mean absolute difference per recording
+went from 0.12–1.27 to 0.005–0.051 levels.
+
+At 2× native is unchanged (`--compare-backends native native2`: riding 34.31 dB, low-pass 44.05, sample 47.01;
+cutscene 47.48, 58.92, 63.18). Against the CPU reference at 2× the cutscene went from 42.15 to 47.48 dB (low-pass 43.80
+→ 58.87) and riding from 34.27 to 34.26 dB (low-pass 43.35 → 43.93, sample 45.92 → 47.48). With the M6 effect tags
+(layer-2 passes still blend in GL) `cut2` went from 45.37 to 50.05 dB, `field2` 34.30 → 34.66, `slow4` 38.83 → 39.06,
+forced 31.02 → 30.98.
+
+Replay time (best of 5, wall time including loading): native unchanged; `GSCpuBackend` 2–3% slower (riding 1.59 →
+1.62 s, cutscene 2.30 → 2.34 s); GPU emulation unchanged (riding 0.40 s, cutscene 0.67–0.69 s).
+
+Not done: the GS goldens (`Analysis/oracle/gs_golden`, not in this checkout) record `GSCpuBackend` output and need
+re-recording for this intended change; `ps2x_tests` does not link in `build/port` (missing `ps2_analyzer_lib`). The
+default renderer's fog and spray layers are now 1–2 levels brighter in these scenes. A live harness run of c07 with the
+default renderer (`PS2X_GS_NATIVE=0`, one instance) passes at 26 game frames/s and 43 drawn/s, and its captures look
+right. An earlier run of the same binary (two instances, after an amdgpu ring reset) presented 1 frame/s and aborted
+c04 and c07; the GPU then hung repeatedly. GPU replay times of c04_b and c07_a are unchanged (`--backend gputhread`
+0.21–0.23 s), so that slowdown came from the GPU state, not from this change.
+
 ## Tools
 
 - Record: `PS2X_GS_RECORD=first:count:file` (fields; see `Docs/PROGRESS.md`) while playing or from a savestate
@@ -412,6 +503,7 @@ the same objects in the same order, and `--check-native-scale` renders its scale
 - Synthetic M2 checks: `--check-native-blend`, `--check-native-date`, `--check-native-fbmsk`, `--check-native-pabe`,
   `--check-native-region-repeat`, `--check-native-local-copy` (see M2 in Status).
 - Synthetic M4 check: `--check-native-scale` (see M4).
+- Synthetic M5 check: `--check-native-fog-layers` (see M5).
 
 ### M6 first effect: screen brightness (experimental)
 

@@ -231,3 +231,23 @@ with it, so frames reach the window at the internal resolution without a RAM cop
 through the PS2 display model at 1×. When PS2 memory holds a newer image than the GPU copy (an image
 uploaded straight to the display buffer), that frame is shown at 1×. The blur and glow effects are not yet adapted to higher scales, and the destination
 alpha test is not implemented. See [NATIVE_RENDERER.md](NATIVE_RENDERER.md).
+
+### Native brightness pass (M6 experiment)
+
+`SOTC_NATIVE_BRIGHTNESS=1` tags the game's `screenBrightness` composition for a dedicated full-resolution GPU
+pass when using the native renderer. It is off by default. Compare the same scene and brightness setting with:
+
+```sh
+PS2X_GS_NATIVE=1 SOTC_NATIVE_BRIGHTNESS=0 ./run.sh
+PS2X_GS_NATIVE=1 SOTC_NATIVE_BRIGHTNESS=1 ./run.sh
+```
+
+The option also works in `sotc.ini`. The neutral game setting (8) emits no brightness draw, so change brightness
+in the game options to exercise it. CPU/GPU emulation backends use the original GS draw even when the option is
+on. Unrecognized native pass variants also retain that draw. This is the first M6 integration experiment;
+blur, glow, shadows and models still follow their existing paths. No speed improvement is claimed.
+
+`SOTC_NATIVE_EFFECTS=1` turns on the brightness pass and the native depth of field, feedback blur, screen blur,
+solar flare, zFog and front fog passes together. Each has its own switch (`SOTC_NATIVE_DOF`,
+`SOTC_NATIVE_FEEDBACK_BLUR`, `SOTC_NATIVE_SCREEN_BLUR`, `SOTC_NATIVE_SOLAR_FLARE`, `SOTC_NATIVE_ZFOG`,
+`SOTC_NATIVE_FRONT_FOG`) that overrides it. All default to off and only affect `PS2X_GS_NATIVE=1`.

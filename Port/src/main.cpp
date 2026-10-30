@@ -7,6 +7,7 @@
 #include "runtime/gs/gs_threaded_backend.h"
 #include "runtime/gs/gs_gpu_backend.h"
 #include "sotc/function_hooks.h"
+#include "sotc/native_effects.h"
 #include "sotc/config.h"
 #include "sotc/debug_script.h"
 #include "sotc/display_mode.h"
@@ -291,6 +292,7 @@ int main(int argc, char *argv[])
         sotc::installDisplayMode(runtime);
         sotc::installMouseCamera(runtime);
         sotc::installMotionBlurOption(runtime);
+        sotc::installNativeEffects(runtime);
 #if SOTC_HAS_VU1_PROGRAMS
         registerGeneratedVu1Programs();
 #endif

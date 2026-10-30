@@ -142,7 +142,9 @@ layer order.
 
 ## Status
 
-M0, M1 and M3 are done. `GSNativeBackend` (`External/PS2Recomp/ps2xRuntime/src/lib/gs/native/`) replays both
+M0, M1 and M3 are done. M6 has opt-in native passes for screen brightness and six post effects (see below);
+shadows and models remain pending.
+`GSNativeBackend` (`External/PS2Recomp/ps2xRuntime/src/lib/gs/native/`) replays both
 recordings in `gs_replay` and runs the game with `PS2X_GS_NATIVE=1` (see `Docs/CONFIGURATION.md`).
 
 In the game on Linux, the window's context is created through EGL (a patch to raylib's GLFW platform, applied at
@@ -175,8 +177,23 @@ Lessons from M1:
   float accumulation folded back modulo 256 is exact.
 - GS point sampling takes `floor(u)`; texture coordinates on exact texel edges need a small bias.
 
-Not implemented yet: destination alpha test (448 draws per frame in these scenes), PABE, region clamp/repeat,
+Not implemented yet: destination alpha test (448 draws per frame in these scenes), PABE, region repeat,
 FBMSK, local-to-local transfers out of GPU targets.
+
+### Continuation (2026-10-29)
+
+Read the saved Claude sessions and resumed from the committed M3 implementation. Native texture sampling now
+honors region-clamp (`WMS/WMT=2`) MIN/MAX bounds within the decoded texture, including inverted bounds, and
+includes those bounds in the draw batching key. Region repeat (`WMS/WMT=3`) still warns and uses ordinary clamp.
+Bounds outside the decoded texture are not covered by this change.
+
+`gs_replay --check-native-region-clamp` draws a synthetic atlas of 36 cases and compares readback with the CPU
+backend: U/V repeat, ordinary clamp and region clamp, nearest and bilinear filtering, and normal/inverted bounds.
+It requires a working native OpenGL context and fails instead of accepting CPU fallback. All cases match exactly
+on the Radeon 680M at 1×. Disabling the new region sampling makes the same test fail with 9,594
+channels outside tolerance (maximum error 96), confirming it detects the original bug. The riding and cutscene replays retain the documented CPU/native differences above;
+`--compare-backends` returns 1 because it checks exact equality, which this renderer does not yet achieve.
+M2, M4 and wider gameplay coverage remain unfinished; this change makes no new performance claim.
 
 ## Tools
 
@@ -190,3 +207,75 @@ FBMSK, local-to-local transfers out of GPU targets.
   internal resolution.
 - Compare pass by pass: `gs_replay <recording.gsr> --pass-diff cpu native <fields>`, with `GS_PASS_DUMP=<dir>` to write
   images of the passes that diverge.
+
+- Synthetic region-clamp regression: `gs_replay --check-native-region-clamp` (requires GPU access).
+
+### M6 first effect: screen brightness (experimental)
+
+`SOTC_NATIVE_BRIGHTNESS=1` marks the second sprite vertex emitted by `screenBrightness` (`0x0117F758`),
+at its `gsReg` return address `0x0117F8A0`. The existing game function still computes its brightness color and
+alpha, emits into layer 30, and restores GS state. Only that draw is replaced: a reserved host A+D register
+(`GS_REG_HOST_BRIGHTNESS`, `0x7E`, XYZF2 payload) submits a semantic `ScreenBrightness` command through the
+frontend, recording wrapper and graphics worker. This avoids issuing GPU work while the EE is still building
+the next frame's display list. There is no persistent marker state or new savestate layout.
+
+The native backend draws a fullscreen triangle with a dedicated color shader and the game's blend factors,
+at the internal resolution, clipped to the original scissor. Prior draws are flushed first, later draws restore
+their normal GL state, and target page ownership/writeback are updated. Only the known untextured, depth-independent
+brightness state covering the scissor is eligible. Other variants and other backends submit the original sprite.
+The switch defaults off. The neutral brightness value 8 emits no pass.
+
+Recordings containing the effect use additive opcode 16 with an unchanged `GSPrimitiveBatch` payload. Updated
+replay tools count and replay the effect, including on reference backends; older tools do not understand the new
+opcode. Existing recordings keep their layout. `gs_replay --check-native-brightness` exercises frontend routing,
+multiple brightness levels at 1×/2×/4×, draw ordering, the threaded queue and fallback behavior.
+
+This establishes the ordered game-effect boundary for M6; it does not replace blur/glow chains, shadows or models,
+and is not a performance optimization claim.
+
+Validation on 2026-10-29 (Radeon 680M):
+
+- `--check-native-brightness`: 19 checks pass. Captured RGB is exact against layer 1 at 1×. At 2×/4×,
+  interior differences are bounded by 2 levels from layer 1's interpolation/truncation of constant sprite
+  colors. Leading borders are tested against the brightness formula separately: layer 1's 15/32-pixel
+  coverage shift leaves a 1- or 2-pixel strip at these scales, while the new fullscreen pass covers it.
+  Queue and fallback VRAM comparisons at 1× are exact, including alpha.
+- A live 2× run loads `field.state`, sets brightness to 4, executes the native pass, saves a private state,
+  reloads it and exits normally. Captures before/after loading were inspected. The saved state and logs are
+  in `build/runs/m6-brightness/`; user quick states and brightness configuration were not overwritten.
+- The live recording contains opcode 16; replay on the native backend executes the shader. CPU/direct and
+  CPU/threaded replays have identical presented pixels and VRAM at both field checkpoints.
+- This recording also exposed a replay-tool lifetime bug with trailing queued draws. Comparison tools now
+  keep VRAM alive until the backend workers have stopped, preventing the observed use-after-free crash.
+- The region-clamp regression still passes all 36 tiles exactly. Existing riding output retains the
+  previously documented CPU/native differences. These checks do not establish a speed improvement or
+  whole-game coverage.
+
+For this host-only build, the unchanged generated EE archive was reused through the existing
+`SOTC_GAME_CODE_LIBRARY` CMake option. Guest CPU/context and recording batch layouts are unchanged.
+
+### M6 post effects (experimental)
+
+`SOTC_NATIVE_EFFECTS=1` enables brightness and six post effects together; each also has its own switch:
+`SOTC_NATIVE_DOF`, `SOTC_NATIVE_FEEDBACK_BLUR`, `SOTC_NATIVE_SCREEN_BLUR`, `SOTC_NATIVE_SOLAR_FLARE`,
+`SOTC_NATIVE_ZFOG`, `SOTC_NATIVE_FRONT_FOG`. `Port/src/sotc/native_effects.cpp` watches `gsReg` (`0x1C0928`) calls
+whose return address lies inside the effect's function and, before the first register of a packet, appends a host
+register `GS_REG_HOST_EFFECT` (`0x7D`) naming the effect; `gsRegEnd` closes the scope with effect 0. The game still
+computes every parameter, texture, mask and order. Only the scope changes how a draw is executed.
+
+Inside a scope, the native backend draws each rectangular image pass (a two-vertex sprite with no FBMSK, DATE or
+scan mask on a 32-bit target) as one quad at the internal resolution with a dedicated shader: texture coordinates
+interpolated from the sprite's corners, the game's blend, alpha test, fog and FBA, and a copy of the target when
+it reads itself. Other primitives inside the scope use the normal path. Other backends ignore the tag.
+`PS2X_GS_NATIVE_EFFECT_STATS=1` prints per-effect pass and fallback counts at exit, and `gs_replay
+--original-effects` strips the tags from a recording.
+
+Validation on 2026-10-29 (Radeon 680M):
+
+- `gs_replay --check-native-post-effects`: 77 checks pass (six effects, 1×/2×/4×, texture, copy, blend, self-read,
+  threaded queue and CPU fallback).
+- Live recordings from `field`, `cut2450` and `slow` (scale 2 and 4, camera motion) and one with depth of field
+  forced: screen blur, solar flare, zFog and front fog run natively (up to 712 solar flare passes in 40 fields)
+  with no fallback. Replayed at 1×, presented frames with the tags differ from the same recording replayed with
+  `--original-effects` by at most 1 level. Depth of field and feedback blur did not reach the tagged path in these
+  recordings and are covered only by the synthetic checks.

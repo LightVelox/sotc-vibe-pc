@@ -24,6 +24,7 @@ set(SOTC_HOST_SOURCES
     src/sotc/log.cpp
     src/sotc/module_guard.cpp
     src/sotc/motion_blur.cpp
+    src/sotc/native_effects.cpp
     src/sotc/mouse_camera.cpp
     src/sotc/sha256.cpp
     src/sotc/window_icon.cpp

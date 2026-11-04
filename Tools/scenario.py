@@ -5,6 +5,8 @@ import json
 import os
 import re
 import shutil
+import signal
+import struct
 import subprocess
 import sys
 import threading
@@ -13,21 +15,28 @@ import types
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "Tools"))
+WINDOWS = sys.platform == "win32"
 
-_mb_path = os.path.join(REPO, "Tools", "measure_boot.py")
-mb = types.ModuleType("mb")
-mb.__dict__["__file__"] = _mb_path
-_src = open(_mb_path).read()
-exec(compile(_src[:_src.index("def main():")], _mb_path, "exec"), mb.__dict__)
-from audio_check import close_window  # noqa: E402
+if WINDOWS:
+    # Window capture and closing go through the Win32 helpers; elsewhere the port saves its own screenshots
+    # (PS2X_SCREENSHOT_FIELDS) and the process is stopped with a signal.
+    _mb_path = os.path.join(REPO, "Tools", "measure_boot.py")
+    mb = types.ModuleType("mb")
+    mb.__dict__["__file__"] = _mb_path
+    _src = open(_mb_path).read()
+    exec(compile(_src[:_src.index("def main():")], _mb_path, "exec"), mb.__dict__)
+    from audio_check import close_window  # noqa: E402
 
 ISO = os.path.join(REPO, "Game", "SHADOW_COLOSSUS (PAL).iso")
 if not os.path.exists(ISO):
     _isos = sorted(f for f in os.listdir(os.path.join(REPO, "Game")) if f.lower().endswith(".iso"))
     if _isos:
         ISO = os.path.join(REPO, "Game", _isos[0])
-EXE = os.path.join(REPO, "build", "port", "bin", "sotc.exe")
-DEFAULT_STATE = os.path.join(REPO, "build", "saved_states", "colossus1_prefight.state")
+EXE_NAME = "sotc.exe" if WINDOWS else "sotc"
+EXE = os.path.join(REPO, "build", "port", "bin", EXE_NAME)
+VALUS_STATE = os.path.join(REPO, "build", "saved_states", "colossus1_prefight.state")
+# Without the colossus 1 prefight state, start from the field state and warp to colossus 1 as well.
+DEFAULT_STATE = VALUS_STATE if os.path.exists(VALUS_STATE) else os.path.join(REPO, "build", "hlr-data", "states", "field.state")
 HOOK = "0x1c35b0"
 SCHED_FRAME = 0x1DC9EC
 BOSS_FLAGS_WORD = 0x12E5914
@@ -79,14 +88,30 @@ def expand(steps):
     return ";".join(out)
 
 
-def prepare_exe(workdir):
+def prepare_exe(workdir, exe=None):
     os.makedirs(workdir, exist_ok=True)
-    shutil.copy2(EXE, os.path.join(workdir, "sotc.exe"))
+    exe = exe or EXE
+    shutil.copy2(exe, os.path.join(workdir, EXE_NAME))
     cards = os.path.join(REPO, "build", "port", "bin", "memcards")
     target = os.path.join(workdir, "memcards")
     if os.path.isdir(cards) and not os.path.isdir(target):
         shutil.copytree(cards, target)
-    return os.path.join(workdir, "sotc.exe")
+    return os.path.join(workdir, EXE_NAME)
+
+
+def state_field(path):
+    # Save state header: magic (8 bytes), version (4), field counter (8).
+    with open(path, "rb") as f:
+        head = f.read(20)
+    return struct.unpack_from("<Q", head, 12)[0] if len(head) == 20 else 0
+
+
+def rename_screenshots(out, first):
+    # The port names its screenshots by absolute field; the harness uses fields relative to the loaded state.
+    for f in os.listdir(out):
+        m = re.fullmatch(r"field-(\d+)\.png", f)
+        if m:
+            os.replace(os.path.join(out, f), os.path.join(out, "cap_%06d.png" % max(0, int(m.group(1)) - first)))
 
 
 def run_game(exe, out, state, script, end_rel, captures_every, pad="", extra_env=None, stall=60.0, maxtime=1200.0, stop_bit=None, tail=300):
@@ -110,12 +135,17 @@ def run_game(exe, out, state, script, end_rel, captures_every, pad="", extra_env
         "SOTC_TIMELINE_WATCH": "%x,%x" % (SCHED_FRAME, BOSS_FLAGS_WORD),
         "PS2X_PAD_SCRIPT": pad,
     })
+    base = state_field(state)
+    if not WINDOWS and captures_every:
+        env["PS2X_SCREENSHOT_FIELDS"] = ",".join(str(base + i) for i in range(captures_every, int(end_rel) + 2 * tail, captures_every))
+        env["PS2X_SCREENSHOT_DIR"] = out
     env.update(extra_env or {})
     stdout = open(os.path.join(out, "stdout.txt"), "w")
     p = subprocess.Popen([exe], cwd=REPO, env=env, stdout=stdout, stderr=subprocess.STDOUT)
     t0 = time.perf_counter()
     tl_path = os.path.join(out, "timeline.txt")
     fh = None
+    pending = ""
     hwnd = None
     first = None
     last = 0
@@ -130,7 +160,7 @@ def run_game(exe, out, state, script, end_rel, captures_every, pad="", extra_env
         if now - t0 > maxtime:
             status = "timeout"
             break
-        if hwnd is None:
+        if WINDOWS and hwnd is None:
             ws = mb.windows_of(p.pid)
             if ws:
                 hwnd = ws[0]
@@ -140,7 +170,11 @@ def run_game(exe, out, state, script, end_rel, captures_every, pad="", extra_env
             except OSError:
                 time.sleep(0.05)
                 continue
-        for line in fh.readlines():
+        # Only complete lines: the game may still be writing the last one, and a truncated flags word would read
+        # as a dead colossus.
+        lines = (pending + fh.read()).split("\n")
+        pending = lines.pop()
+        for line in lines:
             parts = line.split()
             if parts and parts[0].isdigit():
                 f = int(parts[0])
@@ -168,12 +202,17 @@ def run_game(exe, out, state, script, end_rel, captures_every, pad="", extra_env
         time.sleep(0.005)
     if p.poll() is None:
         try:
-            close_window(p.pid)
+            if WINDOWS:
+                close_window(p.pid)
+            else:
+                p.send_signal(signal.SIGTERM)
             p.wait(timeout=15)
         except Exception:
             p.kill()
             p.wait()
     stdout.close()
+    if not WINDOWS:
+        rename_screenshots(out, first or base)
     return {"status": status, "first_field": first, "last_field": last, "elapsed": time.perf_counter() - t0}
 
 
@@ -288,8 +327,8 @@ def contact_sheet(out, path, cols=6):
     sheet.save(path)
 
 
-def colossus_steps(n, fight_fields, save_state_dir):
-    steps = [] if n == 1 else [(60, "warp", n)]
+def colossus_steps(n, fight_fields, save_state_dir, warp_valus=False):
+    steps = [] if n == 1 and not warp_valus else [(60, "warp", n)]
     if save_state_dir:
         steps.append((60 + fight_fields - 200, "save", os.path.join(save_state_dir, "colossus%02d_fight.state" % n).replace("\\", "/")))
     steps.append((60 + fight_fields, "kill"))
@@ -317,20 +356,23 @@ def cmd_colossi(a):
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
 
+    extra_env = dict(item.split("=", 1) for item in a.env)
+    valus_state = a.valus_state or (VALUS_STATE if os.path.exists(VALUS_STATE) else "")
+
     def worker(job):
-        exe = prepare_exe(os.path.join(out, "_exe%d" % job))
+        exe = prepare_exe(os.path.join(out, "_exe%d" % job), a.exe)
         while True:
             with lock:
                 if not todo:
                     return
                 n = todo.pop(0)
-            steps = colossus_steps(n, a.fight, save_dir)
+            steps = colossus_steps(n, a.fight, save_dir, warp_valus=not valus_state)
             script = expand(steps)
             cdir = os.path.join(out, "c%02d" % n)
             end = 60 + a.fight + a.after
-            state = a.state if n > 1 else a.valus_state
+            state = valus_state if n == 1 and valus_state else a.state
             print("[c%02d %s] start" % (n, BOSS_NAMES[n - 1]), flush=True)
-            res = run_game(exe, cdir, state, script, end, a.every, stop_bit=BOSS_FLAG_IDS[n - 1] - 32)
+            res = run_game(exe, cdir, state, script, end, a.every, extra_env=extra_env, stop_bit=BOSS_FLAG_IDS[n - 1] - 32)
             rep = analyse(cdir, res, colossus=n, fight_window=(60 + a.fight // 2, 60 + a.fight))
             rep["name"] = BOSS_NAMES[n - 1]
             contact_sheet(cdir, os.path.join(out, "c%02d_sheet.png" % n))
@@ -367,8 +409,9 @@ def cmd_script(a):
     for item in a.steps:
         parts = item.split(":")
         steps.append((int(parts[0]), parts[1], *parts[2:]))
-    exe = prepare_exe(os.path.join(os.path.abspath(a.out), "_exe"))
-    res = run_game(exe, os.path.abspath(a.out), a.state, expand(steps), a.end, a.every, pad=a.pad)
+    exe = prepare_exe(os.path.join(os.path.abspath(a.out), "_exe"), a.exe)
+    extra_env = dict(item.split("=", 1) for item in a.env)
+    res = run_game(exe, os.path.abspath(a.out), a.state, expand(steps), a.end, a.every, pad=a.pad, extra_env=extra_env)
     rep = analyse(os.path.abspath(a.out), res)
     contact_sheet(os.path.abspath(a.out), os.path.join(os.path.abspath(a.out), "sheet.png"))
     print(json.dumps(rep, indent=1))
@@ -384,7 +427,8 @@ def main():
     c.add_argument("--jobs", type=int, default=1)
     c.add_argument("--fight", type=int, default=3000, help="fields between the warp and the kill")
     c.add_argument("--after", type=int, default=7000, help="most fields to keep running after the kill; runs end 300 fields after the colossus is marked dead")
-    c.add_argument("--valus-state", default=DEFAULT_STATE, help="state used for colossus 1, which is fought without a warp")
+    c.add_argument("--valus-state", default="", help="state used for colossus 1, which is then fought without a warp "
+                   "(default: build/saved_states/colossus1_prefight.state if present, else --state and a warp)")
     c.add_argument("--every", type=int, default=300, help="capture interval in fields")
     c.add_argument("--save-states", default="", help="directory for a save state per colossus fight")
     c.set_defaults(func=cmd_colossi)
@@ -395,6 +439,10 @@ def main():
     s.add_argument("--end", type=int, default=6000)
     s.add_argument("--every", type=int, default=300)
     s.add_argument("--pad", default="")
+    for p in (c, s):
+        p.add_argument("--exe", default=EXE, help="game executable to copy for each run (default: %(default)s)")
+        p.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
+                       help="extra environment for the game, e.g. --env PS2X_GS_NATIVE=1 (repeatable)")
     s.set_defaults(func=cmd_script)
     a = ap.parse_args()
     a.func(a)

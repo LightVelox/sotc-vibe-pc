@@ -221,3 +221,39 @@ leaves the emulator threads and process at normal priority.
 `PS2X_VU1_TIMING` defaults to `0` in the port: heavy scenes render as fast as the PC allows while the game clock
 still follows real time. Set `PS2X_VU1_TIMING=1` to make the EE wait for modelled VU1 time like a PS2 (heavy
 scenes then drop to 30 or 20 fps). `PS2X_GS_HW_LOG=1` logs hardware raster shader compiles and fallbacks.
+
+## Native GS renderer (experimental)
+
+`PS2X_GS_NATIVE=1` replaces GS emulation with native GPU rendering into render-target textures, at
+`PS2X_GS_NATIVE_SCALE` times the PS2 resolution (1–8, default 2). It takes precedence over `PS2X_GS_GPU`.
+On Linux the window's OpenGL context is then created through EGL and the GS worker shares textures
+with it, so frames reach the window at the internal resolution without a RAM copy. Elsewhere frames go
+through the PS2 display model at 1×. When PS2 memory holds a newer image than the GPU copy (an image
+uploaded straight to the display buffer), that frame is shown at 1×. Buffers narrower than
+`PS2X_GS_NATIVE_SCALE_MIN_WIDTH` pixels (default 512) stay at 1×: the game's blur, glow and depth-of-field chains
+downsample into such buffers, and keeping them at 1× keeps those effects as wide and as strong as at 1×. `0` scales
+every buffer (effects then spread over fewer screen pixels). See [NATIVE_RENDERER.md](NATIVE_RENDERER.md).
+
+`PS2X_GS_NATIVE_EXACT_BLEND` selects which blended draws blend in the shader with the GS's integer rounding instead
+of GL blending: `0` none (destination alpha test, PABE and bit masks still do), `1` sprites, `2` (default) also
+primitives whose blend factor may be fractional, `3` all. Lower values trade accuracy for speed.
+
+### Native brightness pass (M6 experiment)
+
+`SOTC_NATIVE_BRIGHTNESS=1` tags the game's `screenBrightness` composition for a dedicated full-resolution GPU
+pass when using the native renderer. It is off by default. Compare the same scene and brightness setting with:
+
+```sh
+PS2X_GS_NATIVE=1 SOTC_NATIVE_BRIGHTNESS=0 ./run.sh
+PS2X_GS_NATIVE=1 SOTC_NATIVE_BRIGHTNESS=1 ./run.sh
+```
+
+The option also works in `sotc.ini`. The neutral game setting (8) emits no brightness draw, so change brightness
+in the game options to exercise it. CPU/GPU emulation backends use the original GS draw even when the option is
+on. Unrecognized native pass variants also retain that draw. This is the first M6 integration experiment;
+blur, glow, shadows and models still follow their existing paths. No speed improvement is claimed.
+
+`SOTC_NATIVE_EFFECTS=1` turns on the brightness pass and the native depth of field, feedback blur, screen blur,
+solar flare, zFog and front fog passes together. Each has its own switch (`SOTC_NATIVE_DOF`,
+`SOTC_NATIVE_FEEDBACK_BLUR`, `SOTC_NATIVE_SCREEN_BLUR`, `SOTC_NATIVE_SOLAR_FLARE`, `SOTC_NATIVE_ZFOG`,
+`SOTC_NATIVE_FRONT_FOG`) that overrides it. All default to off and only affect `PS2X_GS_NATIVE=1`.

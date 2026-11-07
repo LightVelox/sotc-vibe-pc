@@ -24,6 +24,7 @@ set(SOTC_HOST_SOURCES
     src/sotc/log.cpp
     src/sotc/module_guard.cpp
     src/sotc/motion_blur.cpp
+    src/sotc/native_effects.cpp
     src/sotc/mouse_camera.cpp
     src/sotc/sha256.cpp
     src/sotc/window_icon.cpp
@@ -56,11 +57,27 @@ endif()
 
 add_executable(sotc ${SOTC_HOST_SOURCES})
 target_include_directories(sotc PRIVATE src "${SOTC_GENERATED_DIR}")
-target_link_libraries(sotc PRIVATE sotc_game_code ps2_runtime)
+if(MSVC)
+    target_link_libraries(sotc PRIVATE sotc_game_code ps2_runtime)
+else()
+    # ps2_runtime reads the function table defined in the game code, which itself calls into ps2_runtime.
+    # GNU ld scans each archive once in order, so the two have to be rescanned as a group.
+    target_link_libraries(sotc PRIVATE "$<LINK_GROUP:RESCAN,sotc_game_code,ps2_runtime>")
+endif()
 if(WIN32)
     enable_language(RC)
     target_sources(sotc PRIVATE assets/sotc.rc)
     target_include_directories(sotc PRIVATE "${CMAKE_SOURCE_DIR}")
+else()
+    # No resource compiler: embed the window icon PNG as a byte array instead.
+    set(SOTC_ICON_PNG "${CMAKE_SOURCE_DIR}/game_icon.png")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SOTC_ICON_PNG}")
+    file(READ "${SOTC_ICON_PNG}" SOTC_ICON_HEX HEX)
+    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," SOTC_ICON_BYTES "${SOTC_ICON_HEX}")
+    file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/embedded/sotc_icon_png.h"
+        CONTENT "#pragma once\nstatic const unsigned char kSotcIconPng[] = {${SOTC_ICON_BYTES}};\n")
+    target_include_directories(sotc PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/embedded")
+    target_compile_definitions(sotc PRIVATE SOTC_HAS_EMBEDDED_ICON=1)
 endif()
 
 file(GLOB SOTC_VU1_SOURCES CONFIGURE_DEPENDS "${SOTC_GENERATED_DIR}/vu1/*.cpp")
@@ -72,7 +89,13 @@ if(SOTC_VU1_SOURCES)
     target_compile_definitions(sotc PRIVATE SOTC_HAS_VU1_PROGRAMS=1)
     if(MSVC)
         target_compile_options(sotc_vu1_code PRIVATE /bigobj /fp:precise /arch:AVX2 /W0 /MP $<$<CONFIG:RelWithDebInfo>:/Ob2>)
+    else()
+        target_compile_options(sotc_vu1_code PRIVATE -w -g0)
     endif()
+endif()
+
+# tools/vu1_bench.cpp samples threads with the Win32 API.
+if(SOTC_VU1_SOURCES AND WIN32)
     add_executable(sotc_vu1_bench tools/vu1_bench.cpp)
     target_include_directories(sotc_vu1_bench PRIVATE "${CMAKE_SOURCE_DIR}/External/PS2Recomp/ps2xRuntime/src/lib/vu")
     target_link_libraries(sotc_vu1_bench PRIVATE sotc_vu1_code ps2_runtime)
@@ -104,6 +127,14 @@ if(MSVC)
     target_compile_options(sotc PRIVATE /fp:precise /W3 /utf-8)
     target_compile_definitions(sotc PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_link_options(sotc PRIVATE /FORCE:MULTIPLE /STACK:16777216)
+else()
+    if(NOT SOTC_GAME_CODE_LIBRARY)
+        # Debug info for thousands of generated files costs gigabytes, so game code is built without it.
+        target_compile_options(sotc_game_code PRIVATE -w -g0 -fwrapv -fno-stack-protector)
+        set_source_files_properties("${SOTC_GENERATED_DIR}/register_functions.cpp" PROPERTIES COMPILE_OPTIONS "-O0" SKIP_PRECOMPILE_HEADERS ON)
+    endif()
+    # Same first-definition-wins linking as /FORCE:MULTIPLE; the 16 MB thread stack is set in main().
+    target_link_options(sotc PRIVATE -Wl,--allow-multiple-definition)
 endif()
 
 set_target_properties(sotc PROPERTIES

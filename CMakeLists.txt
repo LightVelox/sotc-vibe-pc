@@ -18,6 +18,12 @@ set(PS2X_ENABLE_FFMPEG OFF CACHE BOOL "" FORCE)
 set(PS2X_ENABLE_AGRESSIVE_LOGS OFF CACHE BOOL "" FORCE)
 set(PS2X_ENABLE_SCCACHE OFF CACHE BOOL "" FORCE)
 
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    # GCC/Clang equivalents of the MSVC build: AVX2 like /arch:AVX2, no fused multiply-add like
+    # /fp:precise, and no type-based alias analysis, which recompiled guest code would violate.
+    add_compile_options(-march=x86-64-v3 -ffp-contract=off -fno-strict-aliasing)
+endif()
+
 add_subdirectory(External/PS2Recomp EXCLUDE_FROM_ALL)
 if(NOT TARGET vu1_recomp)
     add_executable(vu1_recomp EXCLUDE_FROM_ALL External/PS2Recomp/ps2xTest/tools/vu1_recomp.cpp)

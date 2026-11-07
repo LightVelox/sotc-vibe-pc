@@ -10,6 +10,8 @@ PROFILE = os.path.join(ROOT, "Port", "profile", "SCES-53326_v1.00.json")
 LINK_OUT = os.path.join(ROOT, "build", "link")
 GENERATED = os.path.join(ROOT, "Port", "generated")
 RECOMP_DIR = os.path.join(ROOT, "Port", "recomp")
+EXE = ".exe" if os.name == "nt" else ""
+BUILD_SCRIPT = "build.bat" if os.name == "nt" else "build.sh"
 
 
 def find_iso(explicit):
@@ -26,29 +28,29 @@ def find_iso(explicit):
 
 def find_recompiler():
     candidates = [
-        os.path.join(ROOT, "build", "port", "External", "PS2Recomp", "ps2xRecomp", "ps2_recomp.exe"),
-        os.path.join(ROOT, "build", "ps2recomp-tools", "ps2xRecomp", "ps2_recomp.exe"),
+        os.path.join(ROOT, "build", "port", "External", "PS2Recomp", "ps2xRecomp", "ps2_recomp" + EXE),
+        os.path.join(ROOT, "build", "ps2recomp-tools", "ps2xRecomp", "ps2_recomp" + EXE),
     ]
     for c in candidates:
         if os.path.exists(c):
             return c
-    sys.exit("ps2_recomp.exe not found. Run configure.bat, then: build.bat ps2_recomp")
+    sys.exit(f"ps2_recomp{EXE} not found. Run configure, then: {BUILD_SCRIPT} ps2_recomp")
 
 
 def find_vu1_recompiler():
     candidates = [
-        os.path.join(ROOT, "build", "port", "vu1_recomp.exe"),
-        os.path.join(ROOT, "build", "port", "External", "PS2Recomp", "ps2xTest", "vu1_recomp.exe"),
-        os.path.join(ROOT, "build", "ps2recomp-tools", "ps2xTest", "vu1_recomp.exe"),
+        os.path.join(ROOT, "build", "port", "vu1_recomp" + EXE),
+        os.path.join(ROOT, "build", "port", "External", "PS2Recomp", "ps2xTest", "vu1_recomp" + EXE),
+        os.path.join(ROOT, "build", "ps2recomp-tools", "ps2xTest", "vu1_recomp" + EXE),
     ]
     for c in candidates:
         if os.path.exists(c):
             return c
-    run([os.path.join(ROOT, "build.bat"), "vu1_recomp"])
+    run([os.path.join(ROOT, BUILD_SCRIPT), "vu1_recomp"])
     for c in candidates:
         if os.path.exists(c):
             return c
-    sys.exit("vu1_recomp.exe not found. Run configure.bat, then: build.bat vu1_recomp")
+    sys.exit(f"vu1_recomp{EXE} not found. Run configure, then: {BUILD_SCRIPT} vu1_recomp")
 
 
 def run(cmd, cwd=ROOT):
@@ -122,7 +124,7 @@ def main():
              os.path.join(LINK_OUT, "sotc_runtime_relocs.csv"), GENERATED, os.path.join(LINK_OUT, "sotc_functions.csv")])
         os.makedirs(os.path.join(ROOT, "Analysis"), exist_ok=True)
         shutil.copyfile(os.path.join(LINK_OUT, "sotc_address_map.csv"), os.path.join(ROOT, "Analysis", "ADDRESS_MAP.generated.csv"))
-    print("Generated code is up to date. Next: build.bat")
+    print(f"Generated code is up to date. Next: {BUILD_SCRIPT}")
 
 
 if __name__ == "__main__":

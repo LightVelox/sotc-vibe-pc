@@ -1,4 +1,4 @@
 [submodule "External/PS2Recomp"]
 	path = External/PS2Recomp
-	url = https://github.com/LightVelox/PS2Recomp.git
-	branch = main
+	url = https://github.com/Iarm-t/PS2Recomp.git
+	branch = linux-port

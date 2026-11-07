@@ -7,6 +7,7 @@
 #include "runtime/gs/gs_threaded_backend.h"
 #include "runtime/gs/gs_gpu_backend.h"
 #include "sotc/function_hooks.h"
+#include "sotc/native_effects.h"
 #include "sotc/config.h"
 #include "sotc/debug_script.h"
 #include "sotc/display_mode.h"
@@ -42,6 +43,12 @@ void registerGeneratedVu1Programs();
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#else
+#include <pthread.h>
+#endif
+
+#if SOTC_HAS_EMBEDDED_ICON
+#include "sotc_icon_png.h"
 #endif
 
 namespace
@@ -54,6 +61,13 @@ namespace
         if (length > 0 && length < MAX_PATH)
         {
             return std::filesystem::path(buffer).parent_path();
+        }
+#elif defined(__linux__)
+        std::error_code error;
+        const std::filesystem::path self = std::filesystem::read_symlink("/proc/self/exe", error);
+        if (!error)
+        {
+            return self.parent_path();
         }
 #endif
         return std::filesystem::current_path();
@@ -142,6 +156,15 @@ int main(int argc, char *argv[])
         throttling.StateMask = 0;
         SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
     }
+#else
+    // Match the Windows /STACK:16777216 default for every thread the runtime creates, including the game thread.
+    pthread_attr_t threadAttributes;
+    if (pthread_attr_init(&threadAttributes) == 0)
+    {
+        pthread_attr_setstacksize(&threadAttributes, 16u * 1024u * 1024u);
+        pthread_setattr_default_np(&threadAttributes);
+        pthread_attr_destroy(&threadAttributes);
+    }
 #endif
     std::filesystem::path iso;
     for (int i = 1; i < argc; ++i)
@@ -201,6 +224,9 @@ int main(int argc, char *argv[])
         _putenv_s("PS2X_GS_SHADER_CACHE_DIR", (cacheDir / "gs_shaders").string().c_str());
     if (!std::getenv("PS2X_VU1_TIMING"))
         _putenv_s("PS2X_VU1_TIMING", "0");
+#else
+    setenv("PS2X_GS_SHADER_CACHE_DIR", (cacheDir / "gs_shaders").string().c_str(), 0);
+    setenv("PS2X_VU1_TIMING", "0", 0);
 #endif
     paths.cdImage = std::filesystem::absolute(iso);
     std::error_code error;
@@ -242,6 +268,8 @@ int main(int argc, char *argv[])
                                       static_cast<int>(SizeofResource(module, iconResource)));
             }
         }
+#elif SOTC_HAS_EMBEDDED_ICON
+        sotc::applyWindowIcon(kSotcIconPng, static_cast<int>(sizeof(kSotcIconPng)));
 #endif
         if (!runtime.loadELF(disc.bootElfPath.string()))
         {
@@ -264,6 +292,7 @@ int main(int argc, char *argv[])
         sotc::installDisplayMode(runtime);
         sotc::installMouseCamera(runtime);
         sotc::installMotionBlurOption(runtime);
+        sotc::installNativeEffects(runtime);
 #if SOTC_HAS_VU1_PROGRAMS
         registerGeneratedVu1Programs();
 #endif
